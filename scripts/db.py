@@ -78,8 +78,9 @@ CREATE TABLE push_log (
 def connect(db_path=DB_PATH) -> sqlite3.Connection:
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -265,7 +266,19 @@ def rebuild(db_path=DB_PATH, close: sqlite3.Connection | None = None) -> sqlite3
     return conn
 
 
+REPO_COLS = frozenset({
+    "full_name", "description", "language", "topics", "homepage", "license",
+    "default_branch", "fork", "archived", "stars", "forks", "open_issues",
+    "created_at", "pushed_at", "verified", "source",
+    "first_trend_date", "last_trend_date", "trend_days", "core_days",
+    "best_rank", "best_daily_stars", "profile_status",
+})
+
+
 def upsert_repo(conn: sqlite3.Connection, m: dict, update_existing: bool = False):
+    m = {k: v for k, v in m.items() if k in REPO_COLS}
+    if isinstance(m.get("topics"), list):
+        m["topics"] = json.dumps(m["topics"], ensure_ascii=False)
     existing = conn.execute("SELECT 1 FROM repos WHERE full_name=?", (m["full_name"],)).fetchone()
     if existing and not update_existing:
         return

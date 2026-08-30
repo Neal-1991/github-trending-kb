@@ -1,12 +1,13 @@
-"""飞书群机器人 webhook 推送:日报卡片 + 周报卡片。"""
+"""飞书推送:群机器人 webhook 与自建应用(私聊/群聊)双通道。"""
 import json
 import sys
+import time
 from pathlib import Path
 
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import FEISHU_WEBHOOK
+from config import FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_CHAT_ID, FEISHU_OPEN_ID, FEISHU_WEBHOOK
 
 LIST_TITLES = {
     "total": "🏆 总榜",
@@ -88,15 +89,61 @@ def build_weekly_card(date_str: str, summary: dict) -> dict:
 
 
 def send(card: dict) -> tuple[bool, str]:
-    if not FEISHU_WEBHOOK:
-        return False, "FEISHU_WEBHOOK 未配置"
-    r = requests.post(FEISHU_WEBHOOK, json=card, timeout=30)
-    try:
-        resp = r.json()
-    except ValueError:
-        return False, f"HTTP {r.status_code}: {r.text[:200]}"
-    ok = (resp.get("StatusCode") == 0) or (resp.get("code") == 0)
-    return ok, json.dumps(resp, ensure_ascii=False)
+    """webhook 优先,未配置时走自建应用。"""
+    if FEISHU_WEBHOOK:
+        r = requests.post(FEISHU_WEBHOOK, json=card, timeout=30)
+        try:
+            resp = r.json()
+        except ValueError:
+            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+        ok = (resp.get("StatusCode") == 0) or (resp.get("code") == 0)
+        return ok, json.dumps(resp, ensure_ascii=False)
+    if FEISHU_APP_ID and FEISHU_APP_SECRET and (FEISHU_OPEN_ID or FEISHU_CHAT_ID):
+        return send_via_app(card)
+    return False, "FEISHU_WEBHOOK / FEISHU_APP_* 均未配置"
+
+
+_token_cache: dict = {}
+
+
+def _tenant_access_token() -> str:
+    tok = _token_cache.get("token")
+    exp = _token_cache.get("expire", 0)
+    if tok and time.time() < exp - 120:
+        return tok
+    r = requests.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}, timeout=30)
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"获取 tenant_access_token 失败: {data}")
+    _token_cache["token"] = data["tenant_access_token"]
+    _token_cache["expire"] = time.time() + data.get("expire", 3600)
+    return data["tenant_access_token"]
+
+
+def send_via_app(card: dict) -> tuple[bool, str]:
+    """自建应用通道:im/v1/messages 发交互卡片(私聊 open_id 或群 chat_id)。"""
+    receive_id = FEISHU_CHAT_ID or FEISHU_OPEN_ID
+    id_type = "chat_id" if FEISHU_CHAT_ID else "open_id"
+    payload = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": json.dumps(card["card"], ensure_ascii=False),
+    }
+    r = requests.post(
+        "https://open.feishu.cn/open-apis/im/v1/messages",
+        params={"receive_id_type": id_type},
+        json=payload, timeout=30,
+        headers={"Authorization": f"Bearer {_tenant_access_token()}"},
+    )
+    data = r.json()
+    code = data.get("code")
+    if code == 0:
+        return True, "sent via app"
+    if code in (99991663, 99991661, 99991668):  # token 类错误:清缓存便于重试
+        _token_cache.clear()
+    return False, f"{code}: {data.get('msg')} {json.dumps(data.get('error'), ensure_ascii=False)[:200]}"
 
 
 def card_to_markdown(card: dict) -> str:

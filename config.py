@@ -19,6 +19,11 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GLM_API_KEY = os.getenv("GLM_API_KEY", "")
 GLM_MODEL = os.getenv("GLM_MODEL", "glm-4.5-flash")
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")
+# 飞书自建应用(可发私聊;与群 webhook 二选一,webhook 优先)
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+FEISHU_OPEN_ID = os.getenv("FEISHU_OPEN_ID", "")   # ou_ 开头,发个人
+FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")   # oc_ 开头,发群
 
 # 语言分榜(GitHub trending 语言名,小写)
 LANG_LISTS = ["python", "typescript", "javascript", "rust"]

@@ -44,6 +44,12 @@ def fts_expression(q: str) -> str:
     return " AND ".join(f'"{t}"' for t in terms)
 
 
+def has_short_term(q: str) -> bool:
+    """中文常见两字词(算法/爬虫)短于 trigram 的 3 字符下限,需 LIKE 回退。"""
+    terms = [t for t in q.replace('"', " ").split() if len(t) >= 2]
+    return any(len(t) < 3 for t in terms)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     stats = query("""
@@ -77,7 +83,29 @@ def index(request: Request):
 def search(request: Request, q: str = "", lang: str = "", has_profile: str = ""):
     rows = []
     expr = fts_expression(q) if q else ""
-    if expr:
+    if expr and has_short_term(q):
+        # trigram 无法匹配 <3 字符的词,回退 LIKE(限制在可检索的文本列内)
+        conds, params = [], []
+        for t in [t for t in q.replace('"', " ").split() if len(t) >= 2] or [q.replace(" ", "")]:
+            like = f"%{t}%"
+            conds.append("(r.full_name LIKE ? OR r.description LIKE ? OR p.one_liner LIKE ? "
+                         "OR p.purpose LIKE ? OR p.tech_highlights LIKE ?)")
+            params += [like] * 5
+        sql = """
+          SELECT r.full_name, r.description, r.language, r.stars, r.core_days,
+                 r.first_trend_date, r.verified, p.one_liner,
+                 r.core_days AS score
+          FROM repos r
+          LEFT JOIN profiles p ON p.full_name = r.full_name
+          WHERE (""" + " AND ".join(conds) + ")"
+        if lang:
+            sql += " AND r.language = ?"
+            params.append(lang)
+        if has_profile:
+            sql += " AND p.full_name IS NOT NULL"
+        sql += " ORDER BY score DESC LIMIT 60"
+        rows = query(sql, params)
+    elif expr:
         sql = """
           SELECT r.full_name, r.description, r.language, r.stars, r.core_days,
                  r.first_trend_date, r.verified, p.one_liner,

@@ -32,7 +32,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_PAT || github.token }}
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           GLM_MODEL: ${{ vars.GLM_MODEL || 'glm-4.5-flash' }}
+          # 飞书二选一:群机器人 webhook 或 自建应用(可私聊)
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_OPEN_ID: ${{ secrets.FEISHU_OPEN_ID }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: python scripts/daily_job.py
 
       - name: Commit data

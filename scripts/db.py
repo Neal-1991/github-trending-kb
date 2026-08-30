@@ -3,6 +3,7 @@
 数据流设计:CSV/JSONL 文件是 source of truth(进 git),SQLite 是派生索引
 (不进 git,本地与 Actions 每次重建,秒级完成)。
 """
+import ast
 import csv
 import json
 import sqlite3
@@ -155,7 +156,7 @@ def rebuild(db_path=DB_PATH, close: sqlite3.Connection | None = None) -> sqlite3
                 "full_name": row["full_name"],
                 "description": row["description"] or None,
                 "language": row["language"] or None,
-                "topics": row["topics"] or "[]",
+                "topics": _normalize_topics(row["topics"]),
                 "homepage": row["homepage"] or None,
                 "license": row["license_key"] or None,
                 "default_branch": row["default_branch"] or None,
@@ -273,6 +274,24 @@ REPO_COLS = frozenset({
     "first_trend_date", "last_trend_date", "trend_days", "core_days",
     "best_rank", "best_daily_stars", "profile_status",
 })
+
+
+def _normalize_topics(raw) -> str:
+    """快照 CSV 的 topics 可能是 ['a','b'] 单引号数组或纯串,统一成 JSON 数组。"""
+    if isinstance(raw, list):
+        return json.dumps(raw, ensure_ascii=False)
+    if not raw:
+        return "[]"
+    try:
+        v = json.loads(raw)
+        return json.dumps(v, ensure_ascii=False) if isinstance(v, list) else "[]"
+    except (ValueError, TypeError):
+        pass
+    try:
+        v = ast.literal_eval(raw)
+        return json.dumps(list(v), ensure_ascii=False) if isinstance(v, (list, tuple)) else "[]"
+    except (ValueError, SyntaxError):
+        return "[]"
 
 
 def upsert_repo(conn: sqlite3.Connection, m: dict, update_existing: bool = False):

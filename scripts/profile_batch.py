@@ -8,7 +8,9 @@
   python scripts/profile_batch.py --min-core-days 5
 """
 import argparse
+import ast
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import GLM_API_KEY, GLM_MODEL, PROFILE_DIR, README_DIR
 from scripts import glm_client
 from scripts.db import connect, rebuild
+
+
+def parse_topics(s) -> list:
+    """topics 列可能是 JSON、单引号数组或纯逗号串,宽容解析。"""
+    if not s:
+        return []
+    if isinstance(s, list):
+        return s
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        pass
+    try:
+        v = ast.literal_eval(s)
+        return list(v) if isinstance(v, (list, tuple)) else []
+    except (ValueError, SyntaxError):
+        return [t.strip() for t in re.split(r"[,;]", s) if t.strip()][:10]
 
 
 def main():
@@ -55,7 +75,7 @@ def main():
     for i, (r, readme_path) in enumerate(todo, 1):
         meta = {
             "description": r["description"], "language": r["language"],
-            "topics": json.loads(r["topics"] or "[]"), "license": r["license"],
+            "topics": parse_topics(r["topics"]), "license": r["license"],
             "stars": r["stars"], "created_at": r["created_at"],
         }
         readme = readme_path.read_text(encoding="utf-8")

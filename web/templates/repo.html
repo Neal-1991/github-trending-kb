@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}{{ r.full_name }} · 趋势榜知识库{% endblock %}
+{% block content %}
+<h1><a href="https://github.com/{{ r.full_name }}">{{ r.full_name }}</a> ↗</h1>
+{% if r.one_liner %}<p class="one-liner">{{ r.one_liner }}</p>{% endif %}
+<p class="muted">{{ r.description or "" }}</p>
+
+<div class="cards">
+  <div class="card"><b>{{ r.core_days or 0 }}</b><span>Top10 天数</span></div>
+  <div class="card"><b>{{ r.trend_days or 0 }}</b><span>上榜总天数(Top50)</span></div>
+  <div class="card"><b>#{{ r.best_rank or "—" }}</b><span>最高名次</span></div>
+  <div class="card"><b>{{ r.best_daily_stars or "—" }}</b><span>单日星标峰值</span></div>
+  <div class="card"><b>{{ r.first_trend_date or "—" }}</b><span>首次上榜</span></div>
+  <div class="card"><b>{{ r.stars or "—" }}</b><span>星标(快照)</span></div>
+</div>
+
+<p>
+  {% if r.language %}<span class="badge">{{ r.language }}</span>{% endif %}
+  {% if r.license %}<span class="badge">License: {{ r.license }}</span>{% endif %}
+  {% if topics %}{% for t in topics[:8] %}<span class="badge topic">{{ t }}</span>{% endfor %}{% endif %}
+  {% if r.homepage %}<a class="badge" href="{{ r.homepage }}">主页 ↗</a>{% endif %}
+  {% if not r.verified %}<span class="badge warn">元数据待补(需 GitHub PAT)</span>{% endif %}
+</p>
+
+<h2>项目画像</h2>
+{% if r.purpose %}
+<div class="profile">
+  <section><h3>用途与解决的问题</h3><p>{{ r.purpose }}</p></section>
+  <section><h3>边界与不适用场景</h3><p>{{ r.boundaries }}</p></section>
+  <section><h3>技术栈与实现亮点</h3><p>{{ r.tech_highlights }}</p></section>
+  <section><h3>成熟度与 License</h3><p>{{ r.maturity }}</p></section>
+  <p class="muted">画像来源: {{ r.profile_source or "?" }} · {{ r.profile_model or "" }}</p>
+</div>
+{% else %}
+<p class="notice">画像尚未生成(profile_status={{ r.profile_status or "pending" }})。
+历史重点项目将在会话内批量补齐;新增项目由每日任务自动生成(需配置 GLM_API_KEY)。</p>
+{% endif %}
+
+<h2>历史趋势(Top10 内单日星标)</h2>
+{% if spark %}{{ spark|safe }}{% else %}<p class="muted">无曲线数据</p>{% endif %}
+{% if trend %}
+<table>
+  <tr><th>日期</th><th>当日新增星标</th></tr>
+  {% for t in trend %}
+  <tr><td>{{ t.date }}</td><td>{{ t.stars }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+<p class="muted">Top50 全量观测 {{ all_count }} 天</p>
+{% endblock %}

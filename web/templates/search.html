@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}检索 · GitHub 趋势榜知识库{% endblock %}
+{% block content %}
+<h1>检索</h1>
+<form method="get" action="/search" class="search-form">
+  <input type="search" name="q" value="{{ q }}" placeholder="关键词,如 agent / 数据库 / agent 框架">
+  <select name="lang">
+    <option value="">全部语言</option>
+    {% for l in langs %}
+    <option value="{{ l.language }}" {% if l.language == sel_lang %}selected{% endif %}>
+      {{ l.language }} ({{ l.n }})</option>
+    {% endfor %}
+  </select>
+  <label><input type="checkbox" name="has_profile" value="1" {% if has_profile %}checked{% endif %}> 仅看有画像的</label>
+  <button type="submit">搜索</button>
+</form>
+
+<p class="muted">{{ rows|length }} 条结果{% if q %}(相关度排序){% else %}(按上榜热度){% endif %}</p>
+<table>
+  <tr><th>仓库</th><th>语言</th><th>Top10 天数</th><th>首次上榜</th><th>画像</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a>
+      {% if r.one_liner %}<div class="muted">{{ r.one_liner }}</div>
+      {% elif r.description %}<div class="muted">{{ r.description[:70] }}</div>{% endif %}</td>
+    <td>{{ r.language or "—" }}</td>
+    <td>{{ r.core_days or 0 }}</td>
+    <td>{{ r.first_trend_date or "—" }}</td>
+    <td>{% if r.one_liner %}✅{% else %}—{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

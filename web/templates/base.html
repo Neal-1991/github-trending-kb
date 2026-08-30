@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}GitHub 趋势榜知识库{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+  <a class="brand" href="/">📈 趋势榜知识库</a>
+  <a href="/search">检索</a>
+  <a href="/trends">趋势图谱</a>
+  <a href="/browse">按日浏览</a>
+  <form action="/search" method="get" class="nav-search">
+    <input type="search" name="q" placeholder="搜索项目 / 画像 (中文可用)…" value="{{ q or '' }}">
+  </form>
+</nav>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>GitHub 趋势榜知识库 · 本地检索,不依赖 LLM · 数据来源:GH Archive 重建榜 + 每日真实榜单</footer>
+</body>
+</html>

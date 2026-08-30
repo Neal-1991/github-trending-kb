@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}首页 · GitHub 趋势榜知识库{% endblock %}
+{% block content %}
+<h1>GitHub 趋势榜知识库</h1>
+
+<div class="cards">
+  <div class="card"><b>{{ stats.repos_all }}</b><span>收录仓库</span></div>
+  <div class="card"><b>{{ stats.profiles }}</b><span>AI 画像</span></div>
+  <div class="card"><b>{{ stats.days }}</b><span>追踪天数</span></div>
+  <div class="card"><b>{{ stats.date_from }}<br>{{ stats.date_to }}</b><span>数据区间</span></div>
+  <div class="card"><b>{{ stats.new_week }}</b><span>近 7 天新面孔</span></div>
+</div>
+
+{% if latest_real %}
+<h2>最新真实趋势榜 · {{ latest_real_date }}</h2>
+<ol class="list">
+  {% for r in latest_real %}
+  <li><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a>
+      <span class="muted">+{{ r.stars or '?' }}⭐ 今日</span></li>
+  {% endfor %}
+</ol>
+{% else %}
+<div class="notice">真实榜单尚未接入:配置 .env 并跑一次 <code>python scripts/daily_job.py --dry-run</code>,或等 Actions 定时任务。</div>
+{% endif %}
+
+<h2>最近新面孔</h2>
+<table>
+  <tr><th>仓库</th><th>首次上榜</th><th>语言</th><th>单日峰值</th><th>说明</th></tr>
+  {% for r in new_faces %}
+  <tr>
+    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
+    <td>{{ r.first_trend_date }}</td>
+    <td>{{ r.language or "—" }}</td>
+    <td>{{ r.best_daily_stars or "—" }}</td>
+    <td class="muted">{{ (r.description or "")[:60] }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<div class="notice muted-note">已知数据缺口:GH Archive 公共数据源在 <b>2026-02 之后</b>摄入降级,
+该区间历史重建缺榜,由每日真实榜单自 2026-08-30 起接力补齐。</div>
+{% endblock %}

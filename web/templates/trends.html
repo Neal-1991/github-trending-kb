@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}趋势图谱 · 趋势榜知识库{% endblock %}
+{% block content %}
+<h1>趋势图谱(近五年重建榜)</h1>
+
+<h2>语言份额演变 · 每季度 Top10 项目的语言构成</h2>
+<p class="muted">注意:「其他」中含大量 2023 年后创建但缺元数据的仓库(元数据快照截至 2022-07),语言份额仅 2021-2022 可靠;配置 GitHub PAT 补全后将自动改善。</p>
+{{ stacked|safe }}
+
+<h2>持久霸榜王(Top10 天数 ≥ 10)</h2>
+<table>
+  <tr><th>仓库</th><th>Top10 天数</th><th>上榜总天数</th><th>最高名次</th><th>首次上榜</th><th>语言</th></tr>
+  {% for r in persistent %}
+  <tr>
+    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
+    <td>{{ r.core_days }}</td><td>{{ r.trend_days }}</td><td>#{{ r.best_rank }}</td>
+    <td>{{ r.first_trend_date }}</td><td>{{ r.language or "—" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>现象级单日爆发(数据完整期)</h2>
+<table>
+  <tr><th>日期</th><th>仓库</th><th>单日星标</th></tr>
+  {% for r in spikes %}
+  <tr><td>{{ r.date }}</td><td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td><td>{{ r.stars }}</td></tr>
+  {% endfor %}
+</table>
+
+<h2>数据质量时间线</h2>
+<p class="muted">GH Archive 公共源按月摄入密度:full=完整,partial=降级(Top10 仍可用)。</p>
+<div class="legend">
+  {% for q in quality %}
+  <span class="badge {{ 'warn' if q.quality == 'partial' else 'topic' }}">{{ q.m }} {{ q.quality }} ({{ q.days }}d)</span>
+  {% endfor %}
+</div>
+{% endblock %}

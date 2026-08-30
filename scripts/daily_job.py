@@ -13,11 +13,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import (DAILY_DIR, GITHUB_TOKEN, GLM_API_KEY, PROFILE_DIR, README_DIR)
+from config import (DAILY_DIR, FEISHU_OPEN_ID, GITHUB_TOKEN, GLM_API_KEY, PROFILE_DIR, README_DIR)
 from scripts.db import connect, rebuild, upsert_repo
 from scripts.fetch_trending import fetch_all
 from scripts.fetch_readmes import fetch_one
 from scripts import feishu
+from scripts import feishu_doc
 
 MAX_NEW_PROFILES = 80
 
@@ -78,6 +79,66 @@ def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connect
 
 
 RAW_META = None  # 在 main 里绑定 data/raw/repo_meta_api.jsonl
+
+
+def load_profiles_map(conn: sqlite3.Connection) -> dict:
+    return {r["full_name"]: dict(r) for r in conn.execute(
+        "SELECT full_name, one_liner, purpose, boundaries, tech_highlights, maturity FROM profiles")}
+
+
+def stamp_new_faces(records: list[dict], conn: sqlite3.Connection, date: str):
+    """按 first_trend_date 补 🆕 标记(从 JSONL 回放的记录没有 is_new)。"""
+    first = {r["full_name"]: r["first_trend_date"] for r in conn.execute(
+        "SELECT full_name, first_trend_date FROM repos WHERE first_trend_date IS NOT NULL")}
+    for rec in records:
+        for e in rec["entries"]:
+            e["is_new"] = first.get(e["repo"]) == date
+
+
+def push_daily_doc(date: str, records: list[dict], conn: sqlite3.Connection) -> str | None:
+    """生成当日云文档并推送链接卡片;幂等:每日期只生成一次。"""
+    doc_log = DAILY_DIR / "doc_log.jsonl"
+    done = set()
+    if doc_log.exists():
+        for line in doc_log.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                done.add(json.loads(line)["date"])
+    if date in done:
+        return None
+    stamp_new_faces(records, conn, date)
+    blocks = feishu_doc.build_daily_blocks(date, records, load_profiles_map(conn), conn)
+    url = feishu_doc.generate_doc(f"GitHub 趋势日报 · {date}", blocks, FEISHU_OPEN_ID)
+    append_jsonl(doc_log, {"date": date, "url": url,
+                           "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()})
+    n_entries = sum(len(r["entries"]) for r in records)
+    card = {"msg_type": "interactive", "card": {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"📄 GitHub 趋势日报 · {date}"}, "template": "blue"},
+        "elements": [
+            {"tag": "div", "text": {"tag": "lark_md",
+             "content": f"今日 **{n_entries}** 条榜单记录已收录,完整榜单与项目画像见云文档:\n**[📖 打开今日日报文档]({url})**"}},
+            {"tag": "note", "elements": [{"tag": "plain_text",
+             "content": "文档含: 今日速览 / 重点项目画像(四维) / 今日新面孔"}]},
+        ]}}
+    ok, msg = feishu.send(card)
+    print(f"feishu doc: ok={ok} {url} {msg[:120]}")
+    return url
+
+
+def push_weekly_doc(date: str, summary: dict, conn: sqlite3.Connection):
+    doc_log = DAILY_DIR / "doc_log.jsonl"
+    profiles = load_profiles_map(conn)
+    blocks = feishu_doc.build_weekly_blocks(date, summary, profiles)
+    url = feishu_doc.generate_doc(f"GitHub 趋势周报 · {date}", blocks, FEISHU_OPEN_ID)
+    append_jsonl(doc_log, {"date": f"week-{date}", "url": url,
+                           "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()})
+    card = {"msg_type": "interactive", "card": {
+        "config": {"wide_screen_mode": True},
+        "header": {"title": {"tag": "plain_text", "content": f"📄 GitHub 趋势周报 · {date}"}, "template": "green"},
+        "elements": [{"tag": "div", "text": {"tag": "lark_md",
+                     "content": f"本周新面孔 **{summary['new_repos']}** 个、画像 **{summary['profiled']}** 篇。\n**[📖 打开本周周报文档]({url})**"}}]}}
+    ok, msg = feishu.send(card)
+    print(f"feishu weekly doc: ok={ok} {url} {msg[:120]}")
 
 
 def main():
@@ -144,6 +205,13 @@ def main():
                             "pushed_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
                         })
 
+    # 5.5) 云文档日报(幂等,卡片只做入口)
+    if not dry_run:
+        try:
+            push_daily_doc(date, records, conn)
+        except feishu_doc.DocScopeError as e:
+            print(f"feishu doc ERROR(需在飞书开放平台为应用开通云文档权限): {e}")
+
     # 6) 周报(北京时间周日)
     if datetime.now(ZoneInfo("Asia/Shanghai")).weekday() == 6 and not dry_run and not pushed:
         week_start = (datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=6)).strftime("%Y-%m-%d")
@@ -166,6 +234,10 @@ def main():
         }
         ok, msg = feishu.send(feishu.build_weekly_card(date, summary))
         print(f"feishu weekly: ok={ok} {msg[:200]}")
+        try:
+            push_weekly_doc(date, summary, conn)
+        except feishu_doc.DocScopeError as e:
+            print(f"feishu weekly doc ERROR: {e}")
 
     # 7) 最终重建 + 汇总
     conn = rebuild(close=conn)

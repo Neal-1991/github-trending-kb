@@ -158,10 +158,11 @@ def main():
     for rec in records:
         print(f"  {rec['list_type']}: {len(rec['entries'])} entries")
 
-    # 2) 新面孔识别 + 落盘趋势
+    # 2) 榜单落盘 + 缺画像自愈(上榜但没有画像的都补,含回榜老项目与历史漏网)
+    profiled_names = {r["full_name"] for r in conn.execute("SELECT full_name FROM profiles")}
     new_names = []
     for rec in records:
-        if not rec["entries"] or list_done(conn, date, rec["list_type"]):
+        if not rec["entries"]:
             continue
         for e in rec["entries"]:
             exists = conn.execute("SELECT 1 FROM repos WHERE full_name=?", (e["repo"],)).fetchone()
@@ -172,9 +173,13 @@ def main():
                     "full_name": e["repo"], "description": e.get("description"),
                     "language": e.get("language"), "verified": 0, "source": "trending",
                 })
-        append_jsonl(DAILY_DIR / "trends.jsonl", {"date": date, **rec})
+            if e["repo"] not in profiled_names and e["repo"] not in new_names:
+                new_names.append(e["repo"])
+        if not list_done(conn, date, rec["list_type"]):
+            append_jsonl(DAILY_DIR / "trends.jsonl", {"date": date, **rec})
     new_names = sorted(set(new_names))
-    print(f"new repos today: {len(new_names)}")
+    print(f"new repos today: {sum(1 for r in records for e in r['entries'] if e['is_new'])}, "
+          f"missing profiles to fill: {len(new_names)}")
 
     # 3) 新仓库画像(API 元数据 + README + GLM)
     one_liners = profile_new_repos(new_names, dry_run, conn)

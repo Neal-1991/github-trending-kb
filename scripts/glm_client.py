@@ -47,7 +47,9 @@ def profile_repo(full_name: str, meta: dict, readme: str, timeout: int = 90) -> 
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.3,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
+        # glm-4.5 系为思考型模型:不关思考,推理会耗尽 max_tokens 导致 content 为空
+        "thinking": {"type": "disabled"},
     }
     for attempt in range(1, 4):
         try:
@@ -57,7 +59,10 @@ def profile_repo(full_name: str, meta: dict, readme: str, timeout: int = 90) -> 
             )
             if r.status_code == 200:
                 text = r.json()["choices"][0]["message"]["content"]
-                return _parse_json(text)
+                parsed = _parse_json(text or "")
+                if parsed is None:
+                    print(f"  [glm] {full_name} 空内容/解析失败, raw head: {repr((text or '')[:120])}")
+                return parsed
             print(f"  [glm] {full_name} HTTP {r.status_code}: {r.text[:160]}, attempt {attempt}")
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
             print(f"  [glm] {full_name} error: {e}, attempt {attempt}")

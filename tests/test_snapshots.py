@@ -4,7 +4,7 @@ import json
 import pytest
 
 from scripts import snapshot_store as snap
-from scripts.fetch_trending import FetchValidationError, parse_trending, validate_entries
+from scripts.fetch_trending import parse_trending, validate_entries
 from tests.conftest import make_trending_html
 
 
@@ -36,6 +36,30 @@ def test_save_existing_different_content_requires_overwrite(sandbox):
     snap.save_snapshot(snap.build_snapshot("2026-09-01", _records(13)), overwrite=True)
     history = list(sandbox["daily"].rglob("history/**/*.json"))
     assert len(history) == 1  # 旧版本归档保留
+
+
+def test_legacy_fallback_loads_all_lists(sandbox):
+    date = "2026-09-01"
+    records = [
+        {"date": date, "list_type": "total", "entries": _records()[0]["entries"]},
+        {"date": date, "list_type": "python", "entries": _records()[0]["entries"]},
+    ]
+    legacy = sandbox["daily"] / "trends.jsonl"
+    legacy.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records),
+                      encoding="utf-8")
+    loaded, source = snap.load_day_records(date)
+    assert source == "legacy:trends.jsonl"
+    assert [r["list_type"] for r in loaded] == ["total", "python"]
+
+
+def test_load_snapshot_rejects_tampered_content(sandbox):
+    snapshot = snap.build_snapshot("2026-09-01", _records())
+    path = snap.save_snapshot(snapshot)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["lists"][0]["entries"][0]["repo"] = "tampered/repo"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(snap.SnapshotValidationError, match="snapshot_id"):
+        snap.load_snapshot("2026-09-01")
 
 
 def test_validation_rejects_bad_batch():

@@ -5,6 +5,7 @@ import pytest
 
 from scripts.atomic_io import atomic_write_text
 from scripts.db import connect, rebuild
+from scripts.snapshot_store import build_snapshot, save_snapshot
 from tests.conftest import write_source_files
 
 
@@ -29,6 +30,35 @@ def test_rebuild_builds_and_replaces(sandbox):
     assert conn.execute("SELECT count(*) FROM profiles").fetchone()[0] == 1
     conn.close()
     assert sandbox["db"].exists()
+
+
+def test_rebuild_prefers_canonical_snapshot_over_legacy_day(sandbox):
+    write_source_files(sandbox, repos=3, real_days=1)
+    entries = [{"rank": 1, "repo": "canonical/only", "description": "canonical",
+                "language": "Python", "stars_total": 10, "stars_today": 9, "forks": 1}]
+    save_snapshot(build_snapshot("2026-09-01", [
+        {"list_type": "total", "entries": entries},
+        {"list_type": "python", "entries": entries},
+    ]))
+    conn = rebuild()
+    rows = conn.execute(
+        "SELECT list_type, full_name FROM trend_daily WHERE date='2026-09-01' ORDER BY list_type"
+    ).fetchall()
+    assert [(r["list_type"], r["full_name"]) for r in rows] == [
+        ("python", "canonical/only"), ("total", "canonical/only")]
+    conn.close()
+
+
+def test_rebuild_restores_no_readme_status_from_source(sandbox):
+    write_source_files(sandbox, repos=3, profiles=1)
+    (sandbox["readmes"] / "_missing.txt").write_text(
+        "owner0/repo0\nowner1/repo1\n", encoding="utf-8")
+    conn = rebuild()
+    statuses = {r["full_name"]: r["profile_status"] for r in conn.execute(
+        "SELECT full_name, profile_status FROM repos WHERE full_name IN "
+        "('owner0/repo0','owner1/repo1')")}
+    assert statuses == {"owner0/repo0": "done", "owner1/repo1": "no_readme"}
+    conn.close()
 
 
 def test_rebuild_failure_keeps_old_db(sandbox):

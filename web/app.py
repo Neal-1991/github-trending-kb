@@ -226,6 +226,7 @@ def repo_detail(request: Request, full_name: str,
     trend = conn.execute("""
       SELECT date, stars FROM trend_daily
       WHERE full_name = ? AND list_type='arch:total' AND rank <= 10
+        AND (quality='full' OR quality='partial')
       ORDER BY date
     """, (full_name,)).fetchall()
     all_trend = conn.execute("""
@@ -233,7 +234,7 @@ def repo_detail(request: Request, full_name: str,
       WHERE full_name = ? AND list_type='arch:total'
       ORDER BY date
     """, (full_name,)).fetchall()
-    spark = sparkline([r["stars"] for r in all_trend])
+    spark = sparkline([r["stars"] for r in trend])
     topics = []
     try:
         topics = json.loads(repo["topics"] or "[]")
@@ -301,21 +302,22 @@ def trends(request: Request, conn: sqlite3.Connection = Depends(get_db)):
              COALESCE(NULLIF(t2.language,''),'其他/未知') AS lang, count(*) n
       FROM trend_daily r LEFT JOIN repos t2 ON t2.full_name = r.full_name
       WHERE r.list_type='arch:total' AND r.rank <= 10
+        AND (r.quality='full' OR r.quality='partial')
       GROUP BY q, lang ORDER BY q, n DESC
     """).fetchall()
     quarters = sorted({r["q"] for r in lang_by_quarter})
     top_langs = {}
     for r in lang_by_quarter:
         top_langs[r["lang"]] = top_langs.get(r["lang"], 0) + r["n"]
-    top_lang_names = [l for l, _ in sorted(top_langs.items(), key=lambda x: -x[1])[:8]]
-    series = {l: [] for l in top_lang_names + ["其他"]}
+    top_lang_names = [lang for lang, _ in sorted(top_langs.items(), key=lambda x: -x[1])[:8]]
+    series = {lang: [] for lang in top_lang_names + ["其他"]}
     by_q = {}
     for r in lang_by_quarter:
         by_q.setdefault(r["q"], {})[r["lang"]] = r["n"]
     for qt in quarters:
         d = by_q.get(qt, {})
-        for l in top_lang_names:
-            series[l].append(d.get(l, 0))
+        for lang in top_lang_names:
+            series[lang].append(d.get(lang, 0))
         series["其他"].append(sum(v for k, v in d.items() if k not in top_lang_names))
     stacked = stacked_bars(quarters, series)
 
@@ -377,7 +379,7 @@ def sparkline(points: list, w: int = 640, h: int = 90) -> str:
 
 def stacked_bars(quarters: list, series: dict, w: int = 900, h: int = 260) -> str:
     """季度堆叠柱:每季度一根柱,按语言堆叠。语言名等动态文本全部 html 转义。"""
-    totals = [max(sum(series[l][i] for l in series), 1) for i in range(len(quarters))]
+    totals = [max(sum(series[lang][i] for lang in series), 1) for i in range(len(quarters))]
     bar_w = w / max(len(quarters), 1) * 0.72
     gap = w / max(len(quarters), 1)
     out = [f'<svg viewBox="0 0 {w} {h + 24}" class="stacked" role="img" '

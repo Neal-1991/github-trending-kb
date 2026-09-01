@@ -2,7 +2,7 @@
 {% block title %}检索 · GitHub 趋势榜知识库{% endblock %}
 {% block content %}
 <h1>检索</h1>
-<form method="get" action="/search" class="search-form">
+<form method="get" action="{{ url_for('search') }}" class="search-form">
   <label class="visually-hidden" for="q">关键词</label>
   <input id="q" type="search" name="q" value="{{ q }}" placeholder="关键词,如 agent / 数据库 / agent 框架">
   <label class="visually-hidden" for="lang">语言</label>
@@ -28,7 +28,7 @@
   <tbody>
   {% for r in rows %}
   <tr>
-    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a>
+    <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a>
       {% if r.one_liner %}<div class="muted">{{ r.one_liner }}</div>
       {% elif r.description %}<div class="muted">{{ r.description[:70] }}</div>{% endif %}</td>
     <td>{{ r.language or "—" }}</td>
@@ -45,9 +45,9 @@
 
 {% if pages > 1 %}
 <nav class="pager" aria-label="分页">
-  {% if page > 1 %}<a href="/search?q={{ q }}&lang={{ sel_lang }}&has_profile={{ has_profile }}&page={{ page - 1 }}&per_page={{ per_page }}">← 上一页</a>{% endif %}
+  {% if page > 1 %}<a href="{{ request.url.include_query_params(page=page - 1, per_page=per_page) }}">← 上一页</a>{% endif %}
   <span class="muted">{{ page }} / {{ pages }}</span>
-  {% if page < pages %}<a href="/search?q={{ q }}&lang={{ sel_lang }}&has_profile={{ has_profile }}&page={{ page + 1 }}&per_page={{ per_page }}">下一页 →</a>{% endif %}
+  {% if page < pages %}<a href="{{ request.url.include_query_params(page=page + 1, per_page=per_page) }}">下一页 →</a>{% endif %}
 </nav>
 {% endif %}
 {% endblock %}

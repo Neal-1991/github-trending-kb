@@ -30,6 +30,10 @@ class SnapshotExistsError(RuntimeError):
     """canonical 快照已存在且未显式要求刷新。"""
 
 
+class SnapshotValidationError(ValueError):
+    """快照结构或内容哈希不可信。"""
+
+
 def canonical_content(snapshot: dict) -> dict:
     """参与 snapshot_id 计算与落盘的内容(剔除时间戳与 id 自身)。"""
     return {k: v for k, v in snapshot.items() if k not in ("captured_at", "snapshot_id")}
@@ -39,6 +43,38 @@ def compute_snapshot_id(snapshot: dict) -> str:
     payload = json.dumps(canonical_content(snapshot), ensure_ascii=False,
                          sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def validate_snapshot(snapshot: dict, *, expected_date: str | None = None) -> None:
+    """读取前校验最小结构、日期和内容寻址哈希，损坏时 fail closed。"""
+    if not isinstance(snapshot, dict):
+        raise SnapshotValidationError("快照根节点必须是对象")
+    if snapshot.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
+        raise SnapshotValidationError(
+            f"不支持的快照 schema_version={snapshot.get('schema_version')!r}")
+    date = snapshot.get("date")
+    if not isinstance(date, str) or len(date) != 10:
+        raise SnapshotValidationError("快照缺少合法 date")
+    if expected_date and date != expected_date:
+        raise SnapshotValidationError(f"快照日期 {date} 与文件日期 {expected_date} 不一致")
+    lists = snapshot.get("lists")
+    if not isinstance(lists, list) or not lists:
+        raise SnapshotValidationError("快照 lists 必须是非空数组")
+    seen = set()
+    for item in lists:
+        if not isinstance(item, dict) or not isinstance(item.get("list_type"), str):
+            raise SnapshotValidationError("快照榜单缺少 list_type")
+        if item["list_type"] in seen:
+            raise SnapshotValidationError(f"快照榜单重复: {item['list_type']}")
+        seen.add(item["list_type"])
+        entries = item.get("entries")
+        if not isinstance(entries, list):
+            raise SnapshotValidationError(f"{item['list_type']} entries 必须是数组")
+        if item.get("entry_count") != len(entries):
+            raise SnapshotValidationError(f"{item['list_type']} entry_count 与 entries 不一致")
+    expected_id = compute_snapshot_id(snapshot)
+    if snapshot.get("snapshot_id") != expected_id:
+        raise SnapshotValidationError("snapshot_id 与快照内容不一致")
 
 
 def snapshot_path(date: str, base: Path | None = None) -> Path:
@@ -77,9 +113,10 @@ def build_snapshot(date: str, records: list[dict], *, source_version: str = "par
 
 def save_snapshot(snapshot: dict, *, overwrite: bool = False, base: Path | None = None) -> Path:
     """写 canonical 快照。已存在时:内容相同则幂等返回;不同则要求 overwrite(旧版归档)。"""
+    validate_snapshot(snapshot, expected_date=snapshot.get("date"))
     path = snapshot_path(snapshot["date"], base)
     if path.exists():
-        old = json.loads(path.read_text(encoding="utf-8"))
+        old = load_snapshot(snapshot["date"], base)
         if old.get("snapshot_id") == snapshot["snapshot_id"]:
             return path
         if not overwrite:
@@ -87,7 +124,7 @@ def save_snapshot(snapshot: dict, *, overwrite: bool = False, base: Path | None 
                 f"{path} 已存在(snapshot_id={old.get('snapshot_id')});"
                 f"刷新请用 --refresh-snapshot,旧版本会自动归档")
         history_dir = Path(base or SNAPSHOT_DIR) / "history" / snapshot["date"][:4] / snapshot["date"][5:7]
-        archive = history_dir / f"{snapshot['date']}T{datetime.now(TZ).strftime('%H%M%S')}.json"
+        archive = history_dir / f"{snapshot['date']}T{datetime.now(TZ).strftime('%H%M%S%f')}.json"
         atomic_write_json(archive, old)
     atomic_write_json(path, snapshot)
     return path
@@ -97,12 +134,20 @@ def load_snapshot(date: str, base: Path | None = None) -> dict | None:
     path = snapshot_path(date, base)
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SnapshotValidationError(f"快照 JSON 损坏: {path}") from exc
+    validate_snapshot(snapshot, expected_date=date)
+    return snapshot
 
 
 def snapshot_to_records(snapshot: dict) -> list[dict]:
     """快照 → daily_job/trends.jsonl 兼容的 records 结构。"""
-    return [{"list_type": l["list_type"], "entries": l["entries"]} for l in snapshot["lists"]]
+    return [
+        {"list_type": item["list_type"], "entries": item["entries"]}
+        for item in snapshot["lists"]
+    ]
 
 
 def load_day_records(date: str, base: Path | None = None) -> tuple[list[dict] | None, str]:
@@ -115,9 +160,26 @@ def load_day_records(date: str, base: Path | None = None) -> tuple[list[dict] | 
         return snapshot_to_records(snap), snap["snapshot_id"]
     legacy = DAILY_DIR / "trends.jsonl"
     if legacy.exists():
+        records = []
         for line in legacy.read_text(encoding="utf-8").splitlines():
-            if line.strip() and json.loads(line).get("date") == date:
-                rec = json.loads(line)
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("date") == date:
                 rec.pop("date", None)
-                return [rec], "legacy:trends.jsonl"
+                records.append(rec)
+        if records:
+            return records, "legacy:trends.jsonl"
     return None, ""
+
+
+def iter_snapshots(base: Path | None = None):
+    """按日期遍历所有 canonical 快照；history 目录不参与当前状态重建。"""
+    root = Path(base or SNAPSHOT_DIR)
+    if not root.exists():
+        return
+    for path in sorted(root.glob("[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].json")):
+        date = path.stem
+        snapshot = load_snapshot(date, root)
+        if snapshot is not None:
+            yield snapshot

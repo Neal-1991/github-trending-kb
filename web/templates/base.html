@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}GitHub 趋势榜知识库{% endblock %}</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
 </head>
 <body>
 <a class="skip-link" href="#main">跳到正文</a>
 <nav aria-label="站点导航">
-  <a class="brand" href="/">📈 趋势榜知识库</a>
-  <a href="/search" {% if request.url.path == '/search' %}aria-current="page"{% endif %}>检索</a>
-  <a href="/trends" {% if request.url.path == '/trends' %}aria-current="page"{% endif %}>趋势图谱</a>
-  <a href="/browse" {% if request.url.path == '/browse' %}aria-current="page"{% endif %}>按日浏览</a>
-  <form action="/search" method="get" class="nav-search" role="search">
+  <a class="brand" href="{{ url_for('index') }}">📈 趋势榜知识库</a>
+  <a href="{{ url_for('search') }}" {% if request.url.path.endswith('/search') %}aria-current="page"{% endif %}>检索</a>
+  <a href="{{ url_for('trends') }}" {% if request.url.path.endswith('/trends') %}aria-current="page"{% endif %}>趋势图谱</a>
+  <a href="{{ url_for('browse') }}" {% if request.url.path.endswith('/browse') %}aria-current="page"{% endif %}>按日浏览</a>
+  <form action="{{ url_for('search') }}" method="get" class="nav-search" role="search">
     <input type="search" name="q" aria-label="搜索项目或画像"
            placeholder="搜索项目 / 画像 (中文可用)…" value="{{ q or '' }}">
   </form>

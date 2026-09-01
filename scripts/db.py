@@ -21,8 +21,9 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import ARCH_DAILY_STAR_ANOMALY, DAILY_DIR, DB_PATH, PROFILE_DIR, RAW_DIR
+from config import ARCH_DAILY_STAR_ANOMALY, DAILY_DIR, DB_PATH, PROFILE_DIR, RAW_DIR, README_DIR
 from scripts.atomic_io import replace_file_with_retry
+from scripts.snapshot_store import iter_snapshots, snapshot_to_records
 
 SCHEMA = """
 CREATE TABLE repos (
@@ -73,8 +74,12 @@ CREATE TABLE profiles (
   maturity TEXT,
   model TEXT,
   source TEXT,                -- zcode / glm-api
-  generated_at TEXT
+  generated_at TEXT,
+  input_hash TEXT,
+  schema_version INTEGER,
+  prompt_version TEXT
 );
+CREATE UNIQUE INDEX idx_profiles_input_hash ON profiles(input_hash) WHERE input_hash IS NOT NULL;
 
 CREATE TABLE push_log (
   date TEXT NOT NULL,
@@ -154,7 +159,8 @@ def refresh_repo_stats(conn: sqlite3.Connection):
                             WHERE t.full_name = repos.full_name AND """ + _TRUSTED_WHERE.strip() + """),
         core_days        = (SELECT COUNT(DISTINCT date) FROM trend_daily t
                             WHERE t.full_name = repos.full_name
-                              AND t.list_type = 'arch:total' AND t.rank <= 10),
+                              AND t.list_type = 'arch:total' AND t.rank <= 10
+                              AND """ + _TRUSTED_WHERE.strip() + """),
         best_rank        = (SELECT MIN(rank) FROM trend_daily t
                             WHERE t.full_name = repos.full_name AND """ + _TRUSTED_WHERE.strip() + """),
         best_daily_stars = (SELECT MAX(stars) FROM trend_daily t
@@ -237,7 +243,22 @@ def _import_sources(conn: sqlite3.Connection):
         )
         conn.commit()
 
-    # 2b) 趋势:每日真实榜单 JSONL(canonical 快照的兼容导出)
+    # 2b) 趋势:canonical 快照是主来源；trends.jsonl 仅补没有 canonical 的历史日期。
+    canonical_dates = set()
+    snapshot_entries = []
+    for snapshot in iter_snapshots():
+        date = snapshot["date"]
+        canonical_dates.add(date)
+        for rec in snapshot_to_records(snapshot):
+            for e in rec["entries"]:
+                snapshot_entries.append((date, rec["list_type"], e["rank"], e["repo"],
+                                         e.get("stars_today"), None))
+    if snapshot_entries:
+        conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)",
+                         snapshot_entries)
+        conn.commit()
+
+    # 兼容历史：同日已有 canonical 时整日跳过，避免部分/陈旧导出覆盖快照。
     trends_jsonl = DAILY_DIR / "trends.jsonl"
     if trends_jsonl.exists():
         entries = []
@@ -245,6 +266,8 @@ def _import_sources(conn: sqlite3.Connection):
             if not line.strip():
                 continue
             rec = json.loads(line)
+            if rec["date"] in canonical_dates:
+                continue
             for e in rec["entries"]:
                 entries.append((rec["date"], rec["list_type"], e["rank"], e["repo"],
                                 e.get("stars_today"), None))
@@ -268,10 +291,24 @@ def _import_sources(conn: sqlite3.Connection):
             p = json.loads(line)
             records.append((p["full_name"], p.get("one_liner"), p.get("purpose"),
                             p.get("boundaries"), p.get("tech_highlights"), p.get("maturity"),
-                            p.get("model"), p.get("source"), p.get("generated_at")))
-        conn.executemany("INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?)", records)
+                            p.get("model"), p.get("source"), p.get("generated_at"),
+                            p.get("input_hash"), p.get("schema_version"),
+                            p.get("prompt_version")))
+        conn.executemany("INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", records)
         conn.execute(
             "UPDATE repos SET profile_status='done' WHERE full_name IN (SELECT full_name FROM profiles)")
+        conn.commit()
+
+    # README 永久缺失清单也是 source，避免全量重建丢失 profile 状态。
+    missing_readmes = README_DIR / "_missing.txt"
+    if missing_readmes.exists():
+        names = [(line.strip(),) for line in missing_readmes.read_text(
+            encoding="utf-8").splitlines() if line.strip()]
+        conn.executemany(
+            "UPDATE repos SET profile_status='no_readme' "
+            "WHERE full_name=? AND profile_status!='done'",
+            names,
+        )
         conn.commit()
 
     # 4) 推送日志
@@ -327,7 +364,7 @@ def rebuild(db_path=None, close: sqlite3.Connection | None = None) -> sqlite3.Co
             p.exists() for p in [
                 RAW_DIR / "repo_meta_snapshot.csv", RAW_DIR / "repo_meta_api.jsonl",
                 RAW_DIR / "trends_gharchive.csv", DAILY_DIR / "trends.jsonl",
-                PROFILE_DIR / "profiles.jsonl"])
+                PROFILE_DIR / "profiles.jsonl"]) or any(iter_snapshots())
         _import_sources(conn)
         refresh_repo_stats(conn)
         reindex_fts(conn)

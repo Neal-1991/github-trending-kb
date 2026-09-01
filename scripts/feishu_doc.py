@@ -3,13 +3,11 @@
 流程: create_doc → add_blocks(批量) → grant_access(授权给用户) → 推送链接卡片。
 依赖应用权限: docx:document(创建/编辑)、drive:permission(添加协作者)。
 """
-import json
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_OPEN_ID
 from scripts.feishu import _post_with_retry, _resp_json, _tenant_access_token
 
 API = "https://open.feishu.cn/open-apis"

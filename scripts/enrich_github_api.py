@@ -176,9 +176,11 @@ def main():
         elif r.status_code in (404, 410):
             if args.refresh_stale:
                 # 复查仍不存在才追加,避免重复记录
-                already = any(json.loads(l).get("full_name") == name
-                              for l in GONE.read_text(encoding="utf-8").splitlines()
-                              if l.strip()) if GONE.exists() else False
+                already = any(
+                    json.loads(line).get("full_name") == name
+                    for line in GONE.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ) if GONE.exists() else False
                 if not already:
                     with GONE.open("a", encoding="utf-8") as f:
                         f.write(json.dumps({"full_name": name, "status": r.status_code,

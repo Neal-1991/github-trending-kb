@@ -6,7 +6,7 @@
   daily_doc       日报云文档(created → link_sent 两段状态,link 失败可复用 document_id 重试)
   weekly_message  周报最终入口
   weekly_doc      周报云文档
-事件只追加不修改;读取端按 (kind, date) 取最新状态。
+事件只追加不修改;读取端按 (kind, date, snapshot_id) 取最新状态。
 兼容:迁移期同时识别旧 doc_log.jsonl / push_log.jsonl,避免升级当天重复推送。
 """
 import json
@@ -43,21 +43,23 @@ def _iter_events(path: Path | None = None):
                 continue
 
 
-def latest_event(kind: str, date: str, path: Path | None = None) -> dict | None:
-    """某 (kind, date) 的最新事件;无则 None。"""
+def latest_event(kind: str, date: str, path: Path | None = None,
+                 snapshot_id: str | None = None) -> dict | None:
+    """某投递键的最新事件；snapshot_id 省略时兼容查询该日期任意版本。"""
     found = None
     for e in _iter_events(path):
-        if e.get("kind") == kind and e.get("date") == date:
+        if (e.get("kind") == kind and e.get("date") == date
+                and (snapshot_id is None or e.get("snapshot_id") == snapshot_id)):
             found = e
     return found
 
 
 def legacy_doc_done(date: str) -> bool:
-    """旧 doc_log.jsonl 中的日期(含 week- 前缀)视为已发送,防止升级后重复推送。"""
+    """旧 doc_log.jsonl 精确日期键已发送；日报与 week- 周报互不混用。"""
     if not LEGACY_DOC_LOG.exists():
         return False
     for line in LEGACY_DOC_LOG.read_text(encoding="utf-8").splitlines():
-        if line.strip() and json.loads(line).get("date") in (date, f"week-{date}"):
+        if line.strip() and json.loads(line).get("date") == date:
             return True
     return False
 

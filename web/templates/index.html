@@ -15,7 +15,7 @@
 <h2>最新真实趋势榜 · {{ latest_real_date }}</h2>
 <ol class="list">
   {% for r in latest_real %}
-  <li><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a>
+  <li><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a>
       <span class="muted">+{{ r.stars or '?' }}⭐ 今日</span></li>
   {% endfor %}
 </ol>
@@ -32,7 +32,7 @@
   </thead>
   {% for r in new_faces %}
   <tr>
-    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
+    <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a></td>
     <td>{{ r.first_trend_date }}</td>
     <td>{{ r.language or "—" }}</td>
     <td>{{ r.best_daily_stars or "—" }}</td>

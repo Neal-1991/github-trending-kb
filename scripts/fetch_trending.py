@@ -17,8 +17,13 @@ import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import (DAILY_DIR, LANG_LISTS, STARS_TODAY_COVERAGE,
-                    TRENDING_MAX_ENTRIES, TRENDING_MIN_ENTRIES)
+from config import (
+    DAILY_DIR,
+    LANG_LISTS,
+    STARS_TODAY_COVERAGE,
+    TRENDING_MAX_ENTRIES,
+    TRENDING_MIN_ENTRIES,
+)
 
 DIAG_DIR = DAILY_DIR / "diagnostics"
 REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")

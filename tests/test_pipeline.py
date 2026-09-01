@@ -47,7 +47,6 @@ def test_profile_batch_writes_profiles_table(sandbox, monkeypatch, capsys):
         (sandbox["readmes"] / f"owner{i}__repo{i}.md").write_text("# readme", encoding="utf-8")
     conn = rebuild()
     conn.close()
-    import config
     import scripts.profile_batch as pb
     monkeypatch.setattr(pb, "README_DIR", sandbox["readmes"])
     monkeypatch.setattr(pb, "PROFILE_DIR", sandbox["profiles"])
@@ -66,6 +65,9 @@ def test_profile_batch_writes_profiles_table(sandbox, monkeypatch, capsys):
     pb.main()
     conn = rebuild()
     assert conn.execute("SELECT count(*) FROM profiles").fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT count(*) FROM profiles WHERE input_hash IS NOT NULL"
+    ).fetchone()[0] == 2
     # 重跑:profiles 表已有 → 不再调用 GLM(T17)
     calls.clear()
     pb.main()
@@ -107,6 +109,25 @@ def test_trusted_metrics_exclude_partial_gt10(sandbox):
     refresh_repo_stats(conn)
     row = conn.execute("SELECT best_rank, trend_days FROM repos WHERE full_name='owner0/repo0'").fetchone()
     assert row["best_rank"] == 1          # partial rank30 未生效;rank1 来自 full 天
+    conn.close()
+
+
+def test_core_days_excludes_degraded_observations(sandbox):
+    write_source_files(sandbox, repos=3, trend_days=1)
+    conn = rebuild()
+    before = conn.execute(
+        "SELECT core_days FROM repos WHERE full_name='owner0/repo0'"
+    ).fetchone()["core_days"]
+    conn.execute(
+        "INSERT OR REPLACE INTO trend_daily VALUES "
+        "('2025-01-01','arch:total',1,'owner0/repo0',500,'degraded')")
+    conn.commit()
+    from scripts.db import refresh_repo_stats
+    refresh_repo_stats(conn)
+    after = conn.execute(
+        "SELECT core_days FROM repos WHERE full_name='owner0/repo0'"
+    ).fetchone()["core_days"]
+    assert after == before
     conn.close()
 
 

@@ -19,7 +19,8 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import GLM_API_KEY, GLM_MODEL, PROFILE_DIR, README_DIR
 from scripts import glm_client
-from scripts.db import connect, rebuild
+from scripts.atomic_io import atomic_append_jsonl
+from scripts.db import connect
 
 
 def parse_topics(s) -> list:
@@ -85,18 +86,25 @@ def main():
             "stars": r["stars"], "created_at": r["created_at"],
         }
         readme = readme_path.read_text(encoding="utf-8")
+        input_hash = glm_client.profile_input_hash(r["full_name"], meta, readme, GLM_MODEL)
+        if conn.execute("SELECT 1 FROM profiles WHERE input_hash=?", (input_hash,)).fetchone():
+            print(f"  [{i}/{len(todo)}] {r['full_name']} = 相同输入已完成,跳过")
+            continue
         p = glm_client.profile_repo(r["full_name"], meta, readme)
         if p:
             rec = {"full_name": r["full_name"], **p, "model": GLM_MODEL,
                    "source": "glm-api",
-                   "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()}
-            with (PROFILE_DIR / "profiles.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                   "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
+                   "input_hash": input_hash,
+                   "schema_version": glm_client.PROFILE_SCHEMA_VERSION,
+                   "prompt_version": glm_client.PROMPT_VERSION}
+            atomic_append_jsonl(PROFILE_DIR / "profiles.jsonl", rec)
             # 同一连接写 profiles 表:重跑不重复生成/计费;Web 端 rebuild 后可见
-            conn.execute("INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?)",
+            conn.execute("INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          (r["full_name"], p.get("one_liner"), p.get("purpose"),
                           p.get("boundaries"), p.get("tech_highlights"), p.get("maturity"),
-                          GLM_MODEL, "glm-api", rec["generated_at"]))
+                          GLM_MODEL, "glm-api", rec["generated_at"], input_hash,
+                          glm_client.PROFILE_SCHEMA_VERSION, glm_client.PROMPT_VERSION))
             conn.execute("UPDATE repos SET profile_status='done' WHERE full_name=?",
                          (r["full_name"],))
             conn.commit()

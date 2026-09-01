@@ -19,6 +19,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import README_DIR
+from scripts.atomic_io import atomic_write_text
 from scripts.db import connect
 
 CANDIDATES = ["README.md", "readme.md", "Readme.md", "README.rst", "README.markdown", "README.txt"]
@@ -65,6 +66,24 @@ def fetch_one(full_name: str) -> str:
     return "no_readme"
 
 
+def persist_missing_status(results: dict[str, str]) -> None:
+    """把永久缺失状态原子合并到 source；成功获取后可清除旧缺失标记。"""
+    if not MISSING_LOG.exists() and not any(
+            status == "no_readme" for status in results.values()):
+        return
+    missing = set()
+    if MISSING_LOG.exists():
+        missing.update(line.strip() for line in MISSING_LOG.read_text(
+            encoding="utf-8").splitlines() if line.strip())
+    for full_name, status in results.items():
+        if status == "no_readme":
+            missing.add(full_name)
+        elif status in ("ok", "skip"):
+            missing.discard(full_name)
+    text = "".join(f"{name}\n" for name in sorted(missing))
+    atomic_write_text(MISSING_LOG, text)
+
+
 def main():
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     README_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,19 +95,25 @@ def main():
     print(f"fetching READMEs for {len(names)} repos -> {README_DIR}")
 
     stats = {"ok": 0, "skip": 0, "no_readme": 0, "rate_limited": 0, "temporary_error": 0}
-    missing = []
+    results = {}
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(fetch_one, n): n for n in names}
         for i, fut in enumerate(as_completed(futures), 1):
             res = fut.result()
+            results[futures[fut]] = res
             stats[res] = stats.get(res, 0) + 1
-            if res == "no_readme":
-                missing.append(futures[fut])
             if i % 250 == 0:
                 print(f"  {i}/{len(names)} {stats}")
+    persist_missing_status(results)
+    missing = [name for name, status in results.items() if status == "no_readme"]
     if missing:
-        # 覆盖写仅含本次确认的永久缺失;临时失败不进清单
-        MISSING_LOG.write_text("\n".join(sorted(missing)) + "\n", encoding="utf-8")
+        conn.executemany(
+            "UPDATE repos SET profile_status='no_readme' "
+            "WHERE full_name=? AND profile_status!='done'",
+            ((name,) for name in missing),
+        )
+        conn.commit()
+    conn.close()
     print(f"DONE {stats}")
 
 

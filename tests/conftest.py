@@ -38,8 +38,8 @@ def sandbox(tmp_path, monkeypatch):
     """把 config 与各模块的路径全部切到 tmp_path,返回目录句柄。"""
     import config
     import scripts.db as db_mod
-    import scripts.snapshot_store as snap
     import scripts.delivery_log as delivery
+    import scripts.snapshot_store as snap
 
     dirs = {
         "root": tmp_path,
@@ -61,12 +61,14 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod, "RAW_DIR", dirs["raw"])
     monkeypatch.setattr(db_mod, "DAILY_DIR", dirs["daily"])
     monkeypatch.setattr(db_mod, "PROFILE_DIR", dirs["profiles"])
+    monkeypatch.setattr(db_mod, "README_DIR", dirs["readmes"])
     monkeypatch.setattr(db_mod, "DB_PATH", db_path)
     try:
         import scripts.snapshot_store as snap
     except ImportError:
         snap = None
     if snap:
+        monkeypatch.setattr(snap, "DAILY_DIR", dirs["daily"])
         monkeypatch.setattr(snap, "SNAPSHOT_DIR", dirs["daily"] / "snapshots")
         monkeypatch.setattr(snap, "SNAPSHOT_HISTORY_DIR", dirs["daily"] / "snapshots" / "history")
     try:
@@ -88,6 +90,13 @@ def sandbox(tmp_path, monkeypatch):
                           ("RAW_META", dirs["raw"] / "repo_meta_api.jsonl"),
                           ("COMPAT_TRENDS", dirs["daily"] / "trends.jsonl")]:
             monkeypatch.setattr(dj, attr, val, raising=False)
+    try:
+        import scripts.fetch_readmes as readmes
+    except ImportError:
+        readmes = None
+    if readmes:
+        monkeypatch.setattr(readmes, "README_DIR", dirs["readmes"])
+        monkeypatch.setattr(readmes, "MISSING_LOG", dirs["readmes"] / "_missing.txt")
     dirs["db"] = db_path
     return dirs
 

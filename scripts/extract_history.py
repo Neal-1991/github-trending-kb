@@ -18,8 +18,14 @@ from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import (ARCH_END, ARCH_EXTRACT_TOP_N, ARCH_START, CH_PLAYGROUND_URL,
-                    RAW_DIR, month_quality)
+from config import (
+    ARCH_END,
+    ARCH_EXTRACT_TOP_N,
+    ARCH_START,
+    CH_PLAYGROUND_URL,
+    RAW_DIR,
+    month_quality,
+)
 from scripts.atomic_io import replace_file_with_retry
 
 QUERY_TEMPLATE = """

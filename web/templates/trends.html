@@ -16,7 +16,7 @@
   </thead>
   {% for r in persistent %}
   <tr>
-    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
+    <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a></td>
     <td>{{ r.core_days }}</td><td>{{ r.trend_days }}</td><td>#{{ r.best_rank }}</td>
     <td>{{ r.first_trend_date }}</td><td>{{ r.language or "—" }}</td>
   </tr>
@@ -32,7 +32,7 @@
   <tr><th scope="col">日期</th><th scope="col">仓库</th><th scope="col">单日星标</th></tr>
   </thead>
   {% for r in spikes %}
-  <tr><td>{{ r.date }}</td><td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td><td>{{ r.stars }}</td></tr>
+  <tr><td>{{ r.date }}</td><td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a></td><td>{{ r.stars }}</td></tr>
   {% endfor %}
 </table>
 </div>

@@ -14,11 +14,12 @@ import hashlib
 import json
 import sqlite3
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DAILY_DIR, DB_PATH, PROFILE_DIR, RAW_DIR, README_DIR
+from scripts.snapshot_store import SnapshotValidationError, iter_snapshots
 
 CONFLICT_FIELDS = ["description", "language", "stargazers_count", "created_at",
                    "license_key", "fork", "archived", "homepage"]
@@ -68,6 +69,20 @@ def audit_snapshot_csv(errors: list, findings: list) -> dict:
     return {"rows": len(rows), "unique": len(by_name), "dups": len(dups), "conflicts": len(conflicts)}
 
 
+def audit_canonical_snapshots(errors: list) -> dict:
+    """canonical 是每日榜主来源，结构或内容哈希异常属于硬错误。"""
+    snapshots = []
+    try:
+        snapshots = list(iter_snapshots())
+    except (SnapshotValidationError, OSError) as exc:
+        errors.append(f"canonical 快照校验失败: {exc}")
+    return {
+        "files": len(snapshots),
+        "dates": len({snapshot["date"] for snapshot in snapshots}),
+        "lists": sum(len(snapshot["lists"]) for snapshot in snapshots),
+    }
+
+
 def audit_db(errors: list, findings: list) -> dict:
     if not DB_PATH.exists():
         errors.append(f"数据库不存在: {DB_PATH}")
@@ -106,8 +121,8 @@ def audit_db(errors: list, findings: list) -> dict:
     out["partial_rank_gt10"] = conn.execute(
         "SELECT count(*) c FROM trend_daily WHERE quality='partial' AND rank>10").fetchone()["c"]
     if out["partial_rank_gt10"]:
-        findings.append(f"{out['partial_rank_gt10']} 条 partial 且 rank>10 的记录参与"
-                        f"trend_days/best_rank 等聚合(partial 口径仅 Top10 可信)")
+        findings.append(f"raw 中保留 {out['partial_rank_gt10']} 条 partial 且 rank>10 的记录;"
+                        f"trusted 聚合会排除这些记录(partial 口径仅 Top10 可信)")
 
     # profile 状态:README 缺失清单未落到 profile_status
     no_readme = conn.execute(
@@ -115,7 +130,9 @@ def audit_db(errors: list, findings: list) -> dict:
     missing_file = README_DIR / "_missing.txt"
     missing_n = 0
     if missing_file.exists():
-        missing_n = sum(1 for l in missing_file.read_text(encoding="utf-8").splitlines() if l.strip())
+        missing_n = sum(
+            1 for line in missing_file.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
     out["no_readme_status"], out["missing_txt"] = no_readme, missing_n
     if missing_n and not no_readme:
         findings.append(f"_missing.txt 有 {missing_n} 条,但库内 profile_status='no_readme' 为 0"
@@ -124,7 +141,9 @@ def audit_db(errors: list, findings: list) -> dict:
     out["core_days_mixed"] = conn.execute("""
       SELECT count(*) c FROM repos r WHERE r.core_days != (
         SELECT COUNT(DISTINCT date) FROM trend_daily t
-        WHERE t.full_name = r.full_name AND t.rank <= 10 AND t.list_type='arch:total')""").fetchone()["c"]
+        WHERE t.full_name = r.full_name AND t.rank <= 10 AND t.list_type='arch:total'
+          AND (t.quality IS NULL OR t.quality='full'
+               OR (t.quality='partial' AND t.rank <= 10)))""").fetchone()["c"]
     if out["core_days_mixed"]:
         findings.append(f"{out['core_days_mixed']} 个仓库 core_days 混入了真实榜/语言榜"
                         f"(页面口径为历史重建榜 Top10)")
@@ -174,6 +193,7 @@ def main():
               PROFILE_DIR / "profiles.jsonl"]:
         counts[p.name] = audit_jsonl(p, errors, findings)
     counts["repo_meta_snapshot.csv"] = audit_snapshot_csv(errors, findings)
+    counts["canonical_snapshots"] = audit_canonical_snapshots(errors)
     db_info = audit_db(errors, findings)
     mismatch = audit_daily_mismatch(findings)
 

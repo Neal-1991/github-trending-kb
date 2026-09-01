@@ -36,7 +36,7 @@
   {% for r in rows %}
   <tr>
     <td>{{ r.rank }}</td>
-    <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
+    <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a></td>
     <td>{{ r.stars }}</td>
     <td>{% if r.quality == 'partial' %}<span class="badge warn">partial</span>{% else %}{{ r.quality or "" }}{% endif %}</td>
   </tr>

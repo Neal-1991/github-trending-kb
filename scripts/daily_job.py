@@ -24,16 +24,30 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import (DAILY_DIR, FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_OPEN_ID,
-                    GITHUB_TOKEN, GLM_API_KEY, PROFILE_DIR, RAW_DIR, README_DIR)
-from scripts import delivery_log
-from scripts import feishu
-from scripts import feishu_doc
-from scripts.db import rebuild, refresh_repo_stats, upsert_repo
-from scripts.fetch_readmes import fetch_one
+from config import (
+    DAILY_DIR,
+    FEISHU_APP_ID,
+    FEISHU_APP_SECRET,
+    FEISHU_OPEN_ID,
+    GITHUB_TOKEN,
+    GLM_API_KEY,
+    PROFILE_DIR,
+    RAW_DIR,
+    README_DIR,
+)
+from scripts import delivery_log, feishu, feishu_doc
+from scripts.atomic_io import atomic_append_jsonl, atomic_write_text
+from scripts.db import rebuild, refresh_repo_stats, reindex_fts, upsert_repo
+from scripts.fetch_readmes import fetch_one, persist_missing_status
 from scripts.fetch_trending import fetch_all
-from scripts.snapshot_store import (SnapshotExistsError, build_snapshot, load_day_records,
-                                    load_snapshot, save_snapshot, snapshot_to_records)
+from scripts.snapshot_store import (
+    SnapshotExistsError,
+    build_snapshot,
+    load_day_records,
+    load_snapshot,
+    save_snapshot,
+    snapshot_to_records,
+)
 
 MAX_NEW_PROFILES = 80
 TZ = ZoneInfo("Asia/Shanghai")
@@ -49,15 +63,23 @@ def now_iso() -> str:
     return datetime.now(TZ).isoformat(timespec="seconds")
 
 
-def list_done(conn: sqlite3.Connection, date: str, list_type: str) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM trend_daily WHERE date=? AND list_type=? LIMIT 1",
-        (date, list_type)).fetchone() is not None
-
-
 def append_jsonl(path: Path, obj: dict):
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    atomic_append_jsonl(path, obj)
+
+
+def sync_compat_records(date: str, records: list[dict]) -> None:
+    """原子重写某日兼容导出；可修复 canonical 写入后发生的中断或部分追加。"""
+    kept = []
+    if COMPAT_TRENDS.exists():
+        for line in COMPAT_TRENDS.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            if rec.get("date") != date:
+                kept.append(rec)
+    kept.extend({"date": date, **rec} for rec in records)
+    text = "".join(json.dumps(rec, ensure_ascii=False) + "\n" for rec in kept)
+    atomic_write_text(COMPAT_TRENDS, text)
 
 
 # ---------- 阶段 1:捕获 ----------
@@ -76,7 +98,10 @@ def capture_stage(conn: sqlite3.Connection, date: str, *, refresh: bool, dry_run
     snap = load_snapshot(date)
     if snap and not refresh:
         print(f"[capture] 回放 canonical 快照 {date} (snapshot_id={snap['snapshot_id'][:24]}...)")
-        return snapshot_to_records(snap), snap["snapshot_id"]
+        records = snapshot_to_records(snap)
+        if not dry_run:
+            sync_compat_records(date, records)
+        return records, snap["snapshot_id"]
 
     print(f"[capture] 抓取 {date} 榜单{'(refresh,旧版将归档)' if refresh else ''}")
     records = fetch_all()
@@ -93,10 +118,8 @@ def capture_stage(conn: sqlite3.Connection, date: str, *, refresh: bool, dry_run
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"[capture] canonical 快照已写入 (snapshot_id={snapshot['snapshot_id'][:24]}...)")
-    # 兼容导出:trends.jsonl 仍是 db.py 的读取入口,内容与快照一致
-    for rec in records:
-        if not list_done(conn, date, rec["list_type"]):
-            append_jsonl(COMPAT_TRENDS, {"date": date, **rec})
+    # 兼容导出不是 source of truth；整日原子重写，重跑可修复部分写入。
+    sync_compat_records(date, records)
     return records, snapshot["snapshot_id"]
 
 
@@ -111,12 +134,21 @@ def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connect
         print(f"[profile] dry-run: 跳过 {len(new_names)} 个仓库的画像(不调 API/GLM)")
         return one_liners
     from scripts import glm_client
-    from scripts.enrich_github_api import fetch as api_fetch, wait_for_quota
+    from scripts.enrich_github_api import fetch as api_fetch
+    from scripts.enrich_github_api import wait_for_quota
 
     todo = new_names[:MAX_NEW_PROFILES]
     for i, name in enumerate(todo, 1):
-        meta = {"description": None, "language": None, "stars": None, "created_at": None,
-                "license": None, "topics": []}
+        row = conn.execute(
+            "SELECT description, language, stars, created_at, license, topics "
+            "FROM repos WHERE full_name=?", (name,)).fetchone()
+        meta = dict(row) if row else {}
+        meta.setdefault("description", None)
+        meta.setdefault("language", None)
+        meta.setdefault("stars", None)
+        meta.setdefault("created_at", None)
+        meta.setdefault("license", None)
+        meta.setdefault("topics", [])
         if GITHUB_TOKEN:
             m, r = api_fetch(name)
             wait_for_quota(r)
@@ -128,19 +160,37 @@ def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connect
                 print(f"  [{i}/{len(todo)}] {name}: api HTTP {r.status_code}")
         readme_path = README_DIR / (name.replace("/", "__") + ".md")
         status = "cached" if readme_path.exists() else fetch_one(name)
+        persist_missing_status({name: "skip" if status == "cached" else status})
         readme = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+        if not readme:
+            if status == "no_readme":
+                conn.execute("UPDATE repos SET profile_status='no_readme' WHERE full_name=?", (name,))
+                conn.commit()
+            print(f"  [{i}/{len(todo)}] {name}: readme={status},跳过 GLM")
+            continue
+        input_hash = glm_client.profile_input_hash(name, meta, readme)
+        existing_profile = conn.execute(
+            "SELECT one_liner FROM profiles WHERE input_hash=?", (input_hash,)).fetchone()
+        if existing_profile:
+            one_liners[name] = existing_profile["one_liner"] or ""
+            print(f"  [{i}/{len(todo)}] {name}: 相同画像输入已完成,跳过 GLM")
+            continue
         if GLM_API_KEY:
             p = glm_client.profile_repo(name, meta, readme)
             if p:
                 rec = {"full_name": name, **p, "model": glm_client.GLM_MODEL,
-                       "source": "glm-api", "generated_at": now_iso()}
+                       "source": "glm-api", "generated_at": now_iso(),
+                       "input_hash": input_hash,
+                       "schema_version": glm_client.PROFILE_SCHEMA_VERSION,
+                       "prompt_version": glm_client.PROMPT_VERSION}
                 append_jsonl(PROFILE_DIR / "profiles.jsonl", rec)
                 # 同连接写入 profiles 表:重跑不会重复生成/计费(review P1-04)
                 conn.execute(
-                    "INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (name, p.get("one_liner"), p.get("purpose"), p.get("boundaries"),
                      p.get("tech_highlights"), p.get("maturity"), glm_client.GLM_MODEL,
-                     "glm-api", rec["generated_at"]))
+                     "glm-api", rec["generated_at"], input_hash,
+                     glm_client.PROFILE_SCHEMA_VERSION, glm_client.PROMPT_VERSION))
                 conn.execute("UPDATE repos SET profile_status='done' WHERE full_name=?", (name,))
                 conn.commit()
                 one_liners[name] = p.get("one_liner", "")
@@ -154,22 +204,29 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
                   dry_run: bool) -> dict:
     """识别新面孔/缺画像项目并画像;把当日榜单行增量写入数据库。"""
     profiled_names = {r["full_name"] for r in conn.execute("SELECT full_name FROM profiles")}
-    new_names = []
-    for rec in records:
+    profiled_names.update(r["full_name"] for r in conn.execute(
+        "SELECT full_name FROM repos WHERE profile_status='no_readme'"))
+    known_names = {r["full_name"] for r in conn.execute("SELECT full_name FROM repos")}
+    new_names, queued = [], set()
+    new_repo_meta = {}
+    ordered_records = sorted(enumerate(records), key=lambda pair: (
+        0 if pair[1]["list_type"] == "total" else 1, pair[0]))
+    for _, rec in ordered_records:
         for e in rec["entries"]:
-            exists = conn.execute("SELECT 1 FROM repos WHERE full_name=?", (e["repo"],)).fetchone()
-            e["is_new"] = exists is None
-            if e["is_new"]:
+            name = e["repo"]
+            e["is_new"] = name not in known_names
+            if e["is_new"] and name not in new_repo_meta:
+                new_repo_meta[name] = {
+                    "full_name": name, "description": e.get("description"),
+                    "language": e.get("language"), "verified": 0, "source": "trending",
+                }
+            if name not in profiled_names and name not in queued:
+                queued.add(name)
                 new_names.append(e["repo"])
-                if not dry_run:
-                    upsert_repo(conn, {
-                        "full_name": e["repo"], "description": e.get("description"),
-                        "language": e.get("language"), "verified": 0, "source": "trending",
-                    })
-            if e["repo"] not in profiled_names and e["repo"] not in new_names:
-                new_names.append(e["repo"])
-    new_names = sorted(set(new_names))
-    print(f"[profile] 新面孔 {sum(1 for r in records for e in r['entries'] if e['is_new'])},"
+    if not dry_run:
+        for meta in new_repo_meta.values():
+            upsert_repo(conn, meta)
+    print(f"[profile] 新面孔 {len(new_repo_meta)},"
           f"待补画像 {len(new_names)}")
 
     one_liners = profile_new_repos(new_names, dry_run, conn)
@@ -182,6 +239,7 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
             conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)", rows)
             conn.commit()
         refresh_repo_stats(conn)
+        reindex_fts(conn)
     return one_liners
 
 
@@ -209,10 +267,22 @@ def push_daily(conn: sqlite3.Connection, date: str, records: list[dict],
       created      文档已创建但链接未发出 → 重试时复用 document_id,不重复建文档
       link_sent    链接卡片已发出 → 整个日报完成
     """
-    sent = delivery_log.latest_event("daily_message", date)
-    doc_ev = delivery_log.latest_event("daily_doc", date)
-    if sent or delivery_log.legacy_daily_pushed(date):
+    sent = delivery_log.latest_event("daily_message", date, snapshot_id=snapshot_id)
+    doc_ev = delivery_log.latest_event("daily_doc", date, snapshot_id=snapshot_id)
+    any_modern = (delivery_log.latest_event("daily_message", date)
+                  or delivery_log.latest_event("daily_doc", date))
+    if (sent and sent.get("status") == "sent") or (
+            not any_modern and delivery_log.legacy_daily_pushed(date)):
         print("[notify] 日报已发送过,跳过")
+        return
+    if doc_ev and doc_ev.get("status") == "link_sent":
+        # 链接已成功发出但最终事件未落盘：补记状态，不重复发送外部消息。
+        _record_push_log(date, records)
+        delivery_log.append_event(
+            kind="daily_message", date=date, status="sent", channel="doc",
+            message_id=doc_ev.get("message_id"), snapshot_id=snapshot_id,
+            recovered_from="daily_doc:link_sent")
+        print("[notify] 日报链接已发送,已修复最终投递状态")
         return
 
     doc_mode = bool(FEISHU_APP_ID and FEISHU_APP_SECRET)
@@ -220,7 +290,8 @@ def push_daily(conn: sqlite3.Connection, date: str, records: list[dict],
 
     if doc_mode:
         reuse = doc_ev and doc_ev.get("status") == "created"
-        if reuse or not delivery_log.legacy_doc_done(date):
+        legacy_doc_blocks = not delivery_log.latest_event("daily_doc", date)
+        if reuse or not (legacy_doc_blocks and delivery_log.legacy_doc_done(date)):
             try:
                 if reuse:
                     url, document_id = doc_ev["url"], doc_ev["document_id"]
@@ -263,17 +334,42 @@ def push_daily(conn: sqlite3.Connection, date: str, records: list[dict],
 
 
 def _record_push_log(date: str, records: list[dict]):
+    """兼容推送日志按键原子合并，避免逐行追加中断留下半日数据。"""
+    path = DAILY_DIR / "push_log.jsonl"
+    by_key = {}
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            by_key[(item["date"], item["list_type"], item["full_name"])] = item
+    pushed_at = now_iso()
     for rec in records:
         for e in rec["entries"]:
-            append_jsonl(DAILY_DIR / "push_log.jsonl", {
-                "date": date, "list_type": rec["list_type"], "full_name": e["repo"],
-                "pushed_at": now_iso()})
+            item = {"date": date, "list_type": rec["list_type"],
+                    "full_name": e["repo"], "pushed_at": pushed_at}
+            by_key[(date, rec["list_type"], e["repo"])] = item
+    text = "".join(json.dumps(item, ensure_ascii=False) + "\n"
+                   for _, item in sorted(by_key.items()))
+    atomic_write_text(path, text)
 
 
 def push_weekly(conn: sqlite3.Connection, date: str, snapshot_id: str) -> None:
     """周报:状态独立于日报(不再依赖当天日报是否推送)。"""
-    if delivery_log.latest_event("weekly_message", date) or delivery_log.legacy_doc_done(f"week-{date}"):
+    sent = delivery_log.latest_event("weekly_message", date, snapshot_id=snapshot_id)
+    doc_ev = delivery_log.latest_event("weekly_doc", date, snapshot_id=snapshot_id)
+    any_modern = (delivery_log.latest_event("weekly_message", date)
+                  or delivery_log.latest_event("weekly_doc", date))
+    if (sent and sent.get("status") == "sent") or (
+            not any_modern and delivery_log.legacy_doc_done(f"week-{date}")):
         print("[notify] 周报已发送过,跳过")
+        return
+    if doc_ev and doc_ev.get("status") == "link_sent":
+        delivery_log.append_event(
+            kind="weekly_message", date=date, status="sent", channel="doc",
+            message_id=doc_ev.get("message_id"), snapshot_id=snapshot_id,
+            recovered_from="weekly_doc:link_sent")
+        print("[notify] 周报链接已发送,已修复最终投递状态")
         return
     week_start = (datetime.strptime(date, "%Y-%m-%d").date()
                   - timedelta(days=6)).strftime("%Y-%m-%d")
@@ -294,10 +390,16 @@ def push_weekly(conn: sqlite3.Connection, date: str, snapshot_id: str) -> None:
     doc_mode = bool(FEISHU_APP_ID and FEISHU_APP_SECRET)
     if doc_mode:
         try:
-            blocks = feishu_doc.build_weekly_blocks(date, summary, load_profiles_map(conn))
-            doc = feishu_doc.generate_doc(f"GitHub 趋势周报 · {date}", blocks, FEISHU_OPEN_ID)
-            delivery_log.append_event(kind="weekly_doc", date=date, status="created",
-                                      document_id=doc["document_id"], url=doc["url"])
+            reuse = doc_ev and doc_ev.get("status") == "created"
+            if reuse:
+                doc = {"document_id": doc_ev["document_id"], "url": doc_ev["url"]}
+                print(f"[notify] 复用已创建周报文档: {doc['url']}")
+            else:
+                blocks = feishu_doc.build_weekly_blocks(date, summary, load_profiles_map(conn))
+                doc = feishu_doc.generate_doc(f"GitHub 趋势周报 · {date}", blocks, FEISHU_OPEN_ID)
+                delivery_log.append_event(kind="weekly_doc", date=date, status="created",
+                                          document_id=doc["document_id"], url=doc["url"],
+                                          snapshot_id=snapshot_id)
             card = {"msg_type": "interactive", "card": {
                 "config": {"wide_screen_mode": True},
                 "header": {"title": {"tag": "plain_text", "content": f"📄 GitHub 趋势周报 · {date}"},
@@ -311,7 +413,7 @@ def push_weekly(conn: sqlite3.Connection, date: str, snapshot_id: str) -> None:
             if ok:
                 delivery_log.append_event(kind="weekly_doc", date=date, status="link_sent",
                                           document_id=doc["document_id"], url=doc["url"],
-                                          message_id=message_id)
+                                          message_id=message_id, snapshot_id=snapshot_id)
                 delivery_log.append_event(kind="weekly_message", date=date, status="sent",
                                           channel="doc", message_id=message_id,
                                           snapshot_id=snapshot_id)
@@ -354,39 +456,52 @@ def main():
     if args.capture_only and args.notify_only:
         ap.error("--capture-only 与 --notify-only 互斥")
     date = args.date or today_bj()
-    for d in (DAILY_DIR, PROFILE_DIR, README_DIR):
-        d.mkdir(parents=True, exist_ok=True)
+    temp_owner = None
+    conn = None
+    try:
+        if args.dry_run:
+            # 只在系统临时目录构建派生库，项目内 DB 与目录均不变化。
+            temp_owner = tempfile.TemporaryDirectory(prefix="trending-kb-dry-run-")
+            conn = rebuild(Path(temp_owner.name) / "trending.db")
+        else:
+            for d in (DAILY_DIR, PROFILE_DIR, README_DIR):
+                d.mkdir(parents=True, exist_ok=True)
+            conn = rebuild()
 
-    conn = rebuild()
-    print(f"[{date}] daily job start "
-          f"(dry_run={args.dry_run} capture_only={args.capture_only} "
-          f"notify_only={args.notify_only} refresh={args.refresh_snapshot})")
+        print(f"[{date}] daily job start "
+              f"(dry_run={args.dry_run} capture_only={args.capture_only} "
+              f"notify_only={args.notify_only} refresh={args.refresh_snapshot})")
 
-    records, snapshot_id = capture_stage(
-        conn, date, refresh=args.refresh_snapshot, dry_run=args.dry_run,
-        notify_only=args.notify_only)
+        records, snapshot_id = capture_stage(
+            conn, date, refresh=args.refresh_snapshot, dry_run=args.dry_run,
+            notify_only=args.notify_only)
 
-    one_liners = {}
-    if not args.notify_only:
-        one_liners = profile_stage(conn, records, date, dry_run=args.dry_run)
-    else:
-        stamp_new_faces(records, conn, date)
+        one_liners = {}
+        if not args.notify_only:
+            one_liners = profile_stage(conn, records, date, dry_run=args.dry_run)
+        else:
+            stamp_new_faces(records, conn, date)
 
-    if args.dry_run:
-        card = feishu.build_daily_card(date, records, one_liners)
-        preview = Path(tempfile.gettempdir()) / f"trending_preview_{date}.md"
-        preview.write_text(feishu.card_to_markdown(card), encoding="utf-8")
-        print(f"[dry-run] 预览写入系统临时目录: {preview}(source 文件零改动)")
+        if args.dry_run:
+            card = feishu.build_daily_card(date, records, one_liners)
+            preview = Path(tempfile.gettempdir()) / f"trending_preview_{date}.md"
+            preview.write_text(feishu.card_to_markdown(card), encoding="utf-8")
+            print(f"[dry-run] 预览写入系统临时目录: {preview}(项目文件零改动)")
 
-    if not (args.dry_run or args.capture_only):
-        notify_date_weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
-        push_daily(conn, date, records, one_liners, snapshot_id)
-        if notify_date_weekday == 6:
-            push_weekly(conn, date, snapshot_id)
+        if not (args.dry_run or args.capture_only):
+            notify_date_weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
+            push_daily(conn, date, records, one_liners, snapshot_id)
+            if notify_date_weekday == 6:
+                push_weekly(conn, date, snapshot_id)
 
-    total_repos = conn.execute("SELECT count(*) FROM repos").fetchone()[0]
-    total_profiles = conn.execute("SELECT count(*) FROM profiles").fetchone()[0]
-    print(f"DONE repos={total_repos} profiles={total_profiles} snapshot={snapshot_id[:24]}")
+        total_repos = conn.execute("SELECT count(*) FROM repos").fetchone()[0]
+        total_profiles = conn.execute("SELECT count(*) FROM profiles").fetchone()[0]
+        print(f"DONE repos={total_repos} profiles={total_profiles} snapshot={snapshot_id[:24]}")
+    finally:
+        if conn is not None:
+            conn.close()
+        if temp_owner is not None:
+            temp_owner.cleanup()
 
 
 if __name__ == "__main__":

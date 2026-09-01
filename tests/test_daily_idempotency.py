@@ -1,12 +1,10 @@
 """daily_job 幂等/回放/dry-run 零副作用(T02/T03)与投递状态机(T09/T10/T11)。"""
-import json
-from pathlib import Path
 
 import pytest
 
 from scripts import daily_job, delivery_log, feishu
 from scripts.db import rebuild
-from scripts.snapshot_store import build_snapshot, load_snapshot, save_snapshot
+from scripts.snapshot_store import load_snapshot
 from tests.conftest import make_trending_html, write_source_files
 
 
@@ -77,6 +75,18 @@ def test_dry_run_has_zero_source_side_effects(sandbox, no_network):
     assert load_snapshot("2026-09-01") is None
 
 
+def test_main_dry_run_does_not_replace_project_db(sandbox, no_network, monkeypatch):
+    write_source_files(sandbox)
+    conn = rebuild()
+    conn.close()
+    before_db = sandbox["db"].read_bytes()
+    before_sources = _source_hash(sandbox)
+    monkeypatch.setattr("sys.argv", ["daily_job.py", "--dry-run", "--date", "2026-09-02"])
+    daily_job.main()
+    assert sandbox["db"].read_bytes() == before_db
+    assert _source_hash(sandbox) == before_sources
+
+
 def test_refresh_archives_old_snapshot(sandbox, no_network, monkeypatch):
     write_source_files(sandbox)
     conn = rebuild()
@@ -96,8 +106,9 @@ def test_refresh_archives_old_snapshot(sandbox, no_network, monkeypatch):
 def test_delivery_state_and_reuse_document(sandbox, monkeypatch):
     date = "2026-09-01"
     assert not delivery_log.latest_event("daily_doc", date)
-    ev = delivery_log.append_event(kind="daily_doc", date=date, status="created",
-                                   document_id="doc-1", url="https://feishu.cn/docx/doc-1")
+    delivery_log.append_event(kind="daily_doc", date=date, status="created",
+                              document_id="doc-1", url="https://feishu.cn/docx/doc-1",
+                              snapshot_id="sha256:test")
     assert delivery_log.latest_event("daily_doc", date)["status"] == "created"
     # 重试复用同一 document_id,不重复创建
     created = []
@@ -150,3 +161,39 @@ def test_webhook_mode_single_summary_card(sandbox, no_network, monkeypatch):
     assert len(sends) == 1  # 只一条消息,无第二条文档卡片
     daily_job.push_daily(FakeConn(), date, records, {}, "sha256:test")
     assert len(sends) == 1  # 幂等
+
+
+def test_refreshed_snapshot_has_independent_delivery_state(sandbox, no_network, monkeypatch):
+    date = "2026-09-01"
+    sends = []
+    monkeypatch.setattr(feishu, "send", lambda card: (sends.append(card), (True, "ok", None))[1])
+    monkeypatch.setattr(daily_job, "FEISHU_APP_ID", "")
+    monkeypatch.setattr(daily_job, "FEISHU_APP_SECRET", "")
+
+    class FakeConn:
+        def execute(self, *a, **k):
+            return []
+
+    records = _records()
+    daily_job.push_daily(FakeConn(), date, records, {}, "sha256:v1")
+    daily_job.push_daily(FakeConn(), date, records, {}, "sha256:v2")
+    daily_job.push_daily(FakeConn(), date, records, {}, "sha256:v2")
+    assert len(sends) == 2
+    assert delivery_log.latest_event(
+        "daily_message", date, snapshot_id="sha256:v1")["status"] == "sent"
+    assert delivery_log.latest_event(
+        "daily_message", date, snapshot_id="sha256:v2")["status"] == "sent"
+
+
+def test_new_face_flag_is_consistent_across_lists(sandbox, no_network):
+    write_source_files(sandbox, repos=1)
+    conn = rebuild()
+    entry = {"rank": 1, "repo": "new/repo", "description": "new",
+             "language": "Python", "stars_total": 10, "stars_today": 5, "forks": 1}
+    records = [
+        {"list_type": "total", "entries": [dict(entry)]},
+        {"list_type": "python", "entries": [dict(entry)]},
+    ]
+    daily_job.profile_stage(conn, records, "2026-09-02", dry_run=True)
+    assert all(e["is_new"] for rec in records for e in rec["entries"])
+    conn.close()

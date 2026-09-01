@@ -52,24 +52,30 @@ def main():
         sys.exit(1)
 
     conn = connect()
-    rows = conn.execute("""
+    # 先按优先级取全部候选,过滤 README 后再截 limit:避免候选窗口被无 README 项目占满
+    # 而饿死有效候选(review P1-04)。有画像的项目不进入候选(含本次运行刚完成的)。
+    candidates = conn.execute("""
       SELECT r.full_name, r.description, r.language, r.topics, r.license,
              r.stars, r.created_at, r.core_days, r.best_daily_stars
       FROM repos r
-      LEFT JOIN profiles p ON p.full_name = r.full_name
-      WHERE p.full_name IS NULL
+      WHERE r.profile_status != 'done'
+        AND r.full_name NOT IN (SELECT full_name FROM profiles)
         AND r.profile_status != 'no_readme'
         AND r.core_days >= ?
       ORDER BY r.core_days DESC, r.best_daily_stars DESC
-      LIMIT ?
-    """, (args.min_core_days, args.limit)).fetchall()
+    """, (args.min_core_days,)).fetchall()
 
     todo = []
-    for r in rows:
+    skipped_no_readme = 0
+    for r in candidates:
         readme_path = README_DIR / (r["full_name"].replace("/", "__") + ".md")
         if readme_path.exists():
             todo.append((r, readme_path))
-    print(f"待画像: {len(todo)} (候选 {len(rows)},跳过无 README {len(rows) - len(todo)})")
+            if len(todo) >= args.limit:
+                break
+        else:
+            skipped_no_readme += 1
+    print(f"待画像: {len(todo)} (候选 {len(candidates)},跳过无 README {skipped_no_readme})")
 
     ok = 0
     for i, (r, readme_path) in enumerate(todo, 1):
@@ -86,6 +92,11 @@ def main():
                    "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()}
             with (PROFILE_DIR / "profiles.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            # 同一连接写 profiles 表:重跑不重复生成/计费;Web 端 rebuild 后可见
+            conn.execute("INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?)",
+                         (r["full_name"], p.get("one_liner"), p.get("purpose"),
+                          p.get("boundaries"), p.get("tech_highlights"), p.get("maturity"),
+                          GLM_MODEL, "glm-api", rec["generated_at"]))
             conn.execute("UPDATE repos SET profile_status='done' WHERE full_name=?",
                          (r["full_name"],))
             conn.commit()
@@ -94,6 +105,7 @@ def main():
         else:
             print(f"  [{i}/{len(todo)}] {r['full_name']} ✗ 画像失败,下次重试")
     print(f"DONE ok={ok}/{len(todo)};如需 Web 可见请运行 python scripts/build_db.py")
+    conn.close()
 
 
 if __name__ == "__main__":

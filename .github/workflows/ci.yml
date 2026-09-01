@@ -34,5 +34,8 @@ jobs:
       - name: Test
         run: python -m pytest -p no:cacheprovider
 
+      - name: Rebuild derived database from committed sources
+        run: python scripts/build_db.py
+
       - name: Audit committed source data
         run: python scripts/audit_data.py

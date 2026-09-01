@@ -30,9 +30,10 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.lock
 
-      - name: Preflight tests and data audit
+      - name: Preflight tests, rebuild and data audit
         run: |
           python -m pytest -p no:cacheprovider
+          python scripts/build_db.py
           python scripts/audit_data.py
 
       - name: Capture snapshot, profile and rebuild DB

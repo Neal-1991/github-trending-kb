@@ -64,6 +64,37 @@ jobs:
             done
           fi
 
+      - name: Alert capture failure to Feishu
+        if: failure()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_OPEN_ID: ${{ secrets.FEISHU_OPEN_ID }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from scripts.feishu import send
+          run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card = {
+              "msg_type": "interactive",
+              "card": {
+                  "config": {"wide_screen_mode": True},
+                  "header": {"template": "red", "title": {"tag": "plain_text",
+                              "content": "⚠️ 趋势榜 daily capture 失败"}},
+                  "elements": [
+                      {"tag": "div", "text": {"tag": "lark_md",
+                       "content": f"抓取/画像/落库阶段失败,今日数据未提交。"
+                                  f"请查看[运行日志]({run_url})。"}},
+                  ],
+              },
+          }
+          ok, msg, _ = send(card)
+          print(f"alert ok={ok} resp={msg}")
+          PY
+
   # Job B: 从 canonical 快照回放并通知。不重新抓取;失败时 Job A 的数据已保留。
   notify:
     needs: capture-and-persist
@@ -108,3 +139,34 @@ jobs:
               sleep 10
             done
           fi
+
+      - name: Alert notify failure to Feishu
+        if: failure()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_OPEN_ID: ${{ secrets.FEISHU_OPEN_ID }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from scripts.feishu import send
+          run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card = {
+              "msg_type": "interactive",
+              "card": {
+                  "config": {"wide_screen_mode": True},
+                  "header": {"template": "red", "title": {"tag": "plain_text",
+                              "content": "⚠️ 趋势榜 daily notify 失败"}},
+                  "elements": [
+                      {"tag": "div", "text": {"tag": "lark_md",
+                       "content": f"通知阶段失败(数据已落库,仅推送未完成)。"
+                                  f"请查看[运行日志]({run_url})。"}},
+                  ],
+              },
+          }
+          ok, msg, _ = send(card)
+          print(f"alert ok={ok} resp={msg}")
+          PY

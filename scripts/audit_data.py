@@ -69,17 +69,31 @@ def audit_snapshot_csv(errors: list, findings: list) -> dict:
     return {"rows": len(rows), "unique": len(by_name), "dups": len(dups), "conflicts": len(conflicts)}
 
 
-def audit_canonical_snapshots(errors: list) -> dict:
-    """canonical 是每日榜主来源，结构或内容哈希异常属于硬错误。"""
+def audit_canonical_snapshots(errors: list, findings: list) -> dict:
+    """canonical 是每日榜主来源，结构/内容哈希异常属于硬错误；抓取日缺快照属于质量发现。"""
     snapshots = []
     try:
         snapshots = list(iter_snapshots())
     except (SnapshotValidationError, OSError) as exc:
         errors.append(f"canonical 快照校验失败: {exc}")
+    snapshot_dates = {snapshot["date"] for snapshot in snapshots}
+    legacy_only = set()
+    if DAILY_DIR.joinpath("trends.jsonl").exists():
+        for line in DAILY_DIR.joinpath("trends.jsonl").read_text(
+                encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            date = json.loads(line).get("date")
+            if date and date not in snapshot_dates:
+                legacy_only.add(date)
+    if legacy_only:
+        findings.append(f"{len(legacy_only)} 个抓取日缺 canonical 快照(仅 trends.jsonl 兜底): "
+                        f"{sorted(legacy_only)};正常情况下每次抓取都会先落快照")
     return {
         "files": len(snapshots),
-        "dates": len({snapshot["date"] for snapshot in snapshots}),
+        "dates": len(snapshot_dates),
         "lists": sum(len(snapshot["lists"]) for snapshot in snapshots),
+        "legacy_only_dates": len(legacy_only),
     }
 
 
@@ -138,6 +152,16 @@ def audit_db(errors: list, findings: list) -> dict:
         findings.append(f"_missing.txt 有 {missing_n} 条,但库内 profile_status='no_readme' 为 0"
                         f"(README 状态机未落库)")
 
+    # 画像积压:出现在真实抓取日(quality 为空)但仍是 pending 的仓库,
+    # 反映单轮 MAX_NEW_PROFILES 截断后的 backlog 深度
+    out["profile_backlog"] = conn.execute("""
+      SELECT count(DISTINCT t.full_name) c FROM trend_daily t
+      JOIN repos r ON r.full_name = t.full_name
+      WHERE t.quality IS NULL AND r.profile_status = 'pending'""").fetchone()["c"]
+    if out["profile_backlog"]:
+        findings.append(f"{out['profile_backlog']} 个真实抓取仓库画像仍为 pending"
+                        f"(单轮 80 上限的待补 backlog,超过 500 建议调大上限)")
+
     out["core_days_mixed"] = conn.execute("""
       SELECT count(*) c FROM repos r WHERE r.core_days != (
         SELECT COUNT(DISTINCT date) FROM trend_daily t
@@ -193,7 +217,7 @@ def main():
               PROFILE_DIR / "profiles.jsonl"]:
         counts[p.name] = audit_jsonl(p, errors, findings)
     counts["repo_meta_snapshot.csv"] = audit_snapshot_csv(errors, findings)
-    counts["canonical_snapshots"] = audit_canonical_snapshots(errors)
+    counts["canonical_snapshots"] = audit_canonical_snapshots(errors, findings)
     db_info = audit_db(errors, findings)
     mismatch = audit_daily_mismatch(findings)
 

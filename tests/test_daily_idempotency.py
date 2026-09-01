@@ -4,7 +4,7 @@ import pytest
 
 from scripts import daily_job, delivery_log, feishu
 from scripts.db import rebuild
-from scripts.snapshot_store import load_snapshot
+from scripts.snapshot_store import SnapshotValidationError, load_snapshot, snapshot_path
 from tests.conftest import make_trending_html, write_source_files
 
 
@@ -196,4 +196,45 @@ def test_new_face_flag_is_consistent_across_lists(sandbox, no_network):
     ]
     daily_job.profile_stage(conn, records, "2026-09-02", dry_run=True)
     assert all(e["is_new"] for rec in records for e in rec["entries"])
+    conn.close()
+
+
+def test_capture_recovers_from_corrupt_today_snapshot(sandbox, no_network, monkeypatch):
+    """今日快照损坏:自动隔离归档并重新抓取,不让全天任务停摆。"""
+    write_source_files(sandbox)
+    conn = rebuild()
+    date = "2026-09-01"
+    daily_job.capture_stage(conn, date, refresh=False, dry_run=False, notify_only=False)
+    monkeypatch.setattr(daily_job, "today_bj", lambda: date)
+    snapshot_path(date).write_text('{"schema_version": 999, "broken":', encoding="utf-8")
+    records, sid = daily_job.capture_stage(
+        conn, date, refresh=False, dry_run=False, notify_only=False)
+    fresh = load_snapshot(date)
+    assert fresh is not None and fresh["snapshot_id"] == sid
+    assert no_network["fetch"] == 2  # 损坏后确实重新抓取了
+    # history 布局为 snapshots/history/YYYY/MM/
+    assert list((snapshot_path(date).parents[2] / "history").rglob("*.json"))
+    conn.close()
+
+
+def test_capture_fails_closed_for_corrupt_historical_snapshot(sandbox, no_network, monkeypatch):
+    """历史日期快照损坏:fail closed,必须显式处理,不能被静默绕过。"""
+    write_source_files(sandbox)
+    conn = rebuild()
+    date = "2026-09-01"
+    daily_job.capture_stage(conn, date, refresh=False, dry_run=False, notify_only=False)
+    monkeypatch.setattr(daily_job, "today_bj", lambda: "2026-09-05")
+    snapshot_path(date).write_text("not-json", encoding="utf-8")
+    with pytest.raises(SnapshotValidationError):
+        daily_job.capture_stage(conn, date, refresh=False, dry_run=False, notify_only=False)
+    conn.close()
+
+
+def test_profile_truncation_is_logged(sandbox, no_network, monkeypatch, capsys):
+    """待画像超过单轮上限时必须留下截断日志,backlog 不能静默堆积。"""
+    conn = rebuild()
+    monkeypatch.setattr(daily_job, "MAX_NEW_PROFILES", 1)
+    monkeypatch.setattr(daily_job, "fetch_one", lambda name: "no_readme")
+    daily_job.profile_new_repos(["owner0/repo0", "owner1/repo1"], dry_run=False, conn=conn)
+    assert "超过单轮上限" in capsys.readouterr().out
     conn.close()

@@ -42,6 +42,7 @@ from scripts.fetch_readmes import fetch_one, persist_missing_status
 from scripts.fetch_trending import fetch_all
 from scripts.snapshot_store import (
     SnapshotExistsError,
+    SnapshotValidationError,
     build_snapshot,
     load_day_records,
     load_snapshot,
@@ -95,7 +96,15 @@ def capture_stage(conn: sqlite3.Connection, date: str, *, refresh: bool, dry_run
         print(f"[capture] 回放 {date} (source={source_id[:24]}...)")
         return records, source_id
 
-    snap = load_snapshot(date)
+    recovered = False
+    try:
+        snap = load_snapshot(date)
+    except SnapshotValidationError as exc:
+        if date != today_bj():
+            raise  # 历史日期 fail closed:损坏的快照必须显式修复,不能被静默绕过
+        recovered = True
+        print(f"WARN: 今日快照校验失败,已降级为重新抓取(旧版将归档): {exc}", file=sys.stderr)
+        snap = None
     if snap and not refresh:
         print(f"[capture] 回放 canonical 快照 {date} (snapshot_id={snap['snapshot_id'][:24]}...)")
         records = snapshot_to_records(snap)
@@ -103,7 +112,8 @@ def capture_stage(conn: sqlite3.Connection, date: str, *, refresh: bool, dry_run
             sync_compat_records(date, records)
         return records, snap["snapshot_id"]
 
-    print(f"[capture] 抓取 {date} 榜单{'(refresh,旧版将归档)' if refresh else ''}")
+    print(f"[capture] 抓取 {date} 榜单{'(refresh,旧版将归档)' if refresh else ''}"
+          f"{'(快照损坏自愈)' if recovered else ''}")
     records = fetch_all()
     for rec in records:
         print(f"  {rec['list_type']}: {len(rec['entries'])} entries")
@@ -113,7 +123,7 @@ def capture_stage(conn: sqlite3.Connection, date: str, *, refresh: bool, dry_run
 
     snapshot = build_snapshot(date, records)
     try:
-        save_snapshot(snapshot, overwrite=refresh)
+        save_snapshot(snapshot, overwrite=refresh or recovered)
     except SnapshotExistsError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
@@ -138,6 +148,9 @@ def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connect
     from scripts.enrich_github_api import wait_for_quota
 
     todo = new_names[:MAX_NEW_PROFILES]
+    if len(new_names) > MAX_NEW_PROFILES:
+        print(f"[profile] 待画像 {len(new_names)} 个超过单轮上限 {MAX_NEW_PROFILES},"
+              f"截断 {len(new_names) - MAX_NEW_PROFILES} 个,由后续每日任务自动补齐")
     for i, name in enumerate(todo, 1):
         row = conn.execute(
             "SELECT description, language, stars, created_at, license, topics "

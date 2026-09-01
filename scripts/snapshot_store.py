@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DAILY_DIR
-from scripts.atomic_io import atomic_write_json
+from scripts.atomic_io import atomic_write_json, atomic_write_text
 
 SNAPSHOT_SCHEMA_VERSION = 2
 SNAPSHOT_DIR = DAILY_DIR / "snapshots"
@@ -112,20 +112,32 @@ def build_snapshot(date: str, records: list[dict], *, source_version: str = "par
 
 
 def save_snapshot(snapshot: dict, *, overwrite: bool = False, base: Path | None = None) -> Path:
-    """写 canonical 快照。已存在时:内容相同则幂等返回;不同则要求 overwrite(旧版归档)。"""
+    """写 canonical 快照。已存在时:内容相同则幂等返回;不同则要求 overwrite(旧版归档)。
+
+    旧文件损坏时同样按"内容不同"处理:overwrite 会把损坏原文原样归档后替换,
+    这是快照损坏自愈(daily_job 捕获阶段)能够走通的前提。
+    """
     validate_snapshot(snapshot, expected_date=snapshot.get("date"))
     path = snapshot_path(snapshot["date"], base)
     if path.exists():
-        old = load_snapshot(snapshot["date"], base)
-        if old.get("snapshot_id") == snapshot["snapshot_id"]:
+        old_raw = path.read_text(encoding="utf-8")
+        try:
+            old = json.loads(old_raw)
+        except json.JSONDecodeError:
+            old = None
+        old_id = old.get("snapshot_id") if isinstance(old, dict) else None
+        if old_id == snapshot["snapshot_id"]:
             return path
         if not overwrite:
             raise SnapshotExistsError(
-                f"{path} 已存在(snapshot_id={old.get('snapshot_id')});"
+                f"{path} 已存在(snapshot_id={old_id or '损坏/无法解析'});"
                 f"刷新请用 --refresh-snapshot,旧版本会自动归档")
         history_dir = Path(base or SNAPSHOT_DIR) / "history" / snapshot["date"][:4] / snapshot["date"][5:7]
         archive = history_dir / f"{snapshot['date']}T{datetime.now(TZ).strftime('%H%M%S%f')}.json"
-        atomic_write_json(archive, old)
+        if old is not None:
+            atomic_write_json(archive, old)
+        else:
+            atomic_write_text(archive, old_raw)
     atomic_write_json(path, snapshot)
     return path
 

@@ -4,6 +4,7 @@
 快照不含 2022-07 之后创建的仓库,这部分由 enrich_github_api.py 用 GitHub API 补全。
 """
 import csv
+import io
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import CH_PLAYGROUND_URL, RAW_DIR
+from scripts.atomic_io import atomic_write_text
 
 COLS = ("full_name, owner_type, description, fork, created_at, pushed_at, homepage, "
         "stargazers_count, forks_count, subscribers_count, language, archived, "
@@ -38,6 +40,10 @@ def run_query(sql: str) -> str:
             )
         finally:
             os.unlink(tf_path)
+        if r.returncode != 0:
+            print(f"  attempt {attempt}: curl rc={r.returncode}: {(r.stderr or '')[:120]!r}")
+            time.sleep(4 * attempt)
+            continue
         text = r.stdout
         if text.lstrip().startswith('"full_name"'):
             return text
@@ -51,30 +57,32 @@ def main():
     names = sorted({row["repo"] for row in csv.DictReader(trends.open(encoding="utf-8"))})
     print(f"unique repos: {len(names)}")
 
-    out = RAW_DIR / "repo_meta_snapshot.csv"
+    chunks: list[str] = []
     found = 0
     chunk = 3000
-    with out.open("w", encoding="utf-8", newline="") as f:
-        writer = None
-        for i in range(0, len(names), chunk):
-            part = names[i:i + chunk]
-            name_list = ",".join("'" + n + "'" for n in part)
-            sql = QUERY_TEMPLATE.format(cols=COLS, names=name_list)
-            t0 = time.time()
-            text = run_query(sql)
-            reader = csv.DictReader(text.splitlines())
-            if writer is None:
-                writer = csv.DictWriter(f, fieldnames=reader.fieldnames)
-                writer.writeheader()
-            n = 0
-            for row in reader:
-                writer.writerow(row)
-                n += 1
-            f.flush()
-            found += n
-            print(f"  chunk {i // chunk + 1}: +{n} ({time.time() - t0:.1f}s)")
-            time.sleep(1)
-    print(f"DONE meta rows={found}/{len(names)} -> {out}")
+    for i in range(0, len(names), chunk):
+        part = names[i:i + chunk]
+        name_list = ",".join("'" + n + "'" for n in part)
+        sql = QUERY_TEMPLATE.format(cols=COLS, names=name_list)
+        t0 = time.time()
+        text = run_query(sql)
+        reader = csv.DictReader(text.splitlines())
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=reader.fieldnames)
+        if not chunks:
+            writer.writeheader()
+        n = 0
+        for row in reader:
+            writer.writerow(row)
+            n += 1
+        chunks.append(buf.getvalue())
+        found += n
+        print(f"  chunk {i // chunk + 1}: +{n} ({time.time() - t0:.1f}s)")
+        time.sleep(1)
+
+    # 全部 chunk 成功后才原子替换正式文件;中途失败不破坏旧快照
+    atomic_write_text(RAW_DIR / "repo_meta_snapshot.csv", "".join(chunks))
+    print(f"DONE meta rows={found}/{len(names)}")
 
 
 if __name__ == "__main__":

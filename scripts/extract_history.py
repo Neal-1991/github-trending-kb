@@ -2,18 +2,25 @@
 
 产出: data/raw/trends_gharchive.csv  (date, repo, stars, quality)
 区间: config.ARCH_START ~ ARCH_END;每月数据质量以 config.month_quality 标注。
-用 curl 子进程发查询(requests 长连接复用在 playground 上会拿到无报错的残缺结果),
-并按"天数×TopN"校验每个窗口的行数完整性,不足则重试。
+
+可靠性设计(原子 + fail closed):
+- curl 检查 returncode 与 stderr,响应头校验,行数不足 98% 重试;
+- 全部窗口成功前只写同目录临时文件;任一窗口最终失败 → 删除临时文件、退出非零,
+  正式 CSV 保持不变;全部成功才原子替换正式文件。
 """
 import csv
+import os
 import subprocess
 import sys
+import tempfile
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import ARCH_END, ARCH_EXTRACT_TOP_N, ARCH_START, CH_PLAYGROUND_URL, RAW_DIR, month_quality
+from config import (ARCH_END, ARCH_EXTRACT_TOP_N, ARCH_START, CH_PLAYGROUND_URL,
+                    RAW_DIR, month_quality)
+from scripts.atomic_io import replace_file_with_retry
 
 QUERY_TEMPLATE = """
 WITH daily AS (
@@ -33,6 +40,11 @@ FORMAT CSVWithNames
 """
 
 HEADER = '"d","repo","stars"'
+COMPLETE_RATIO = 0.98
+
+
+class QueryError(RuntimeError):
+    pass
 
 
 def month_add(y: int, m: int, k: int):
@@ -64,43 +76,57 @@ def run_query(sql: str) -> str:
         ["curl", "-s", "-m", "300", CH_PLAYGROUND_URL, "--data-binary", sql],
         capture_output=True, text=True, encoding="utf-8",
     )
+    if r.returncode != 0:
+        raise QueryError(f"curl 失败(rc={r.returncode}): {(r.stderr or '')[:200]}")
     return r.stdout
 
 
 def fetch_window(w_start: str, w_end: str) -> list[dict]:
+    """返回窗口行;最终仍不完整则抛 QueryError(由 main 决定整体失败)。"""
     sql = QUERY_TEMPLATE.format(start=w_start, end=w_end, top=ARCH_EXTRACT_TOP_N)
     want = expected_rows(w_start, w_end, ARCH_EXTRACT_TOP_N)
+    rows: list[dict] | None = None
+    last_head = ""
     for attempt in range(1, 5):
         text = run_query(sql)
         if not text.lstrip().startswith(HEADER):
-            print(f"  attempt {attempt}: bad response head: {text[:120]!r}")
+            last_head = text[:120]
+            print(f"  attempt {attempt}: bad response head: {last_head!r}")
             time.sleep(4 * attempt)
             continue
         rows = list(csv.DictReader(text.splitlines()))
-        if len(rows) >= want * 0.98:
+        if len(rows) >= want * COMPLETE_RATIO:
             return rows
         print(f"  attempt {attempt}: got {len(rows)}/{want} rows, retrying")
         time.sleep(4 * attempt)
-    print(f"  WARNING: {w_start} window incomplete after retries")
-    return rows
+    if rows is None:
+        raise QueryError(f"{w_start} 窗口 4 次响应均异常,最后响应头: {last_head!r}")
+    raise QueryError(f"{w_start} 窗口不完整(最多 {len(rows)}/{want} 行),按 fail-closed 中止")
 
 
 def main():
     out = RAW_DIR / "trends_gharchive.csv"
     rows_total = 0
-    with out.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["date", "repo", "stars", "quality"])
-        for w_start, w_end in windows(ARCH_START, ARCH_END):
-            t0 = time.time()
-            rows = fetch_window(w_start, w_end)
-            for row in rows:
-                ym = int(row["d"].replace("-", "")[:6])
-                writer.writerow([row["d"], row["repo"], row["stars"], month_quality(ym)])
-            f.flush()
-            rows_total += len(rows)
-            print(f"{w_start} ~ {w_end}: {len(rows)} rows ({time.time() - t0:.1f}s)")
-            time.sleep(1)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(out.parent), prefix=out.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["date", "repo", "stars", "quality"])
+            for w_start, w_end in windows(ARCH_START, ARCH_END):
+                t0 = time.time()
+                rows = fetch_window(w_start, w_end)
+                for row in rows:
+                    ym = int(row["d"].replace("-", "")[:6])
+                    writer.writerow([row["d"], row["repo"], row["stars"], month_quality(ym)])
+                f.flush()
+                rows_total += len(rows)
+                print(f"{w_start} ~ {w_end}: {len(rows)} rows ({time.time() - t0:.1f}s)")
+                time.sleep(1)
+        replace_file_with_retry(Path(tmp_name), out)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
     print(f"DONE total={rows_total} -> {out}")
 
 

@@ -28,6 +28,15 @@ FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")   # oc_ 开头,发群
 # 语言分榜(GitHub trending 语言名,小写)
 LANG_LISTS = ["python", "typescript", "javascript", "rust"]
 
+# 抓取校验(所有榜单作为一批提交,任一校验失败不生成 canonical 快照)
+TRENDING_MIN_ENTRIES = 10    # 单榜条数下限
+TRENDING_MAX_ENTRIES = 40    # 单榜条数上限
+STARS_TODAY_COVERAGE = 0.6   # stars_today > 0 的覆盖率阈值
+
+# 历史重建榜单日星标异常阈值(疑似刷星;raw 保留,不参与 best_daily_stars
+# 与 Web"现象级爆发"默认展示。规则版本 v1:纯阈值)
+ARCH_DAILY_STAR_ANOMALY = 15000
+
 # ClickHouse 公共 playground(免费,只读)
 CH_PLAYGROUND_URL = "https://play.clickhouse.com/?user=explorer"
 

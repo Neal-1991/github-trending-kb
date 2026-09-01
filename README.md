@@ -15,7 +15,7 @@
 ## 快速开始
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.lock
 
 # 1) 构建/重建知识库(原子:临时库校验通过才替换,约 3 秒)
 python scripts/build_db.py
@@ -28,8 +28,9 @@ uvicorn web.app:app --port 8000
 python scripts/daily_job.py --dry-run
 
 # 4) 运行测试与数据审计
-pip install -e ".[dev]"
-python -m pytest tests/
+pip install -r requirements.lock
+python -m ruff check .
+python -m pytest -p no:cacheprovider
 python scripts/audit_data.py
 ```
 
@@ -102,7 +103,7 @@ python scripts/audit_data.py
 - **CSV/JSONL/快照是 source of truth(进 git),SQLite 是派生索引(不进 git)**——Actions 每天把增量 commit 回仓库,本地 `build_db.py` 一键重建,无状态漂移;**所有正式文件原子替换**,失败时旧数据保持不变。
 - **当日快照不可变**,画像/日报/推送引用同一 `snapshot_id`,可追溯一致性;刷新必须显式 `--refresh-snapshot` 并自动归档旧版。
 - **聚合采用 trusted 口径**:`full` 全可信、`partial` 仅 Top10 可信、`degraded` 不参与聚合;真实榜(quality 为空)单列;重建榜单日星标 ≥ 15000 视为疑似刷星,不参与"单日峰值"与"现象级爆发"展示(raw 记录保留)。
-- **仓库身份现状**:当前仍以 `full_name` 为主键;API 补全已保存 `repo_id`/`node_id`/canonical 名,repo identity v2 迁移待实施(见 `reports/项目全面Review与优化实施规格-供GLM审核实施.md` 阶段 3)。同名复用/改名的仓库(如 `Jarred-Sumner/bun`)在迁移完成前历史统计不可信,可用 `python scripts/audit_data.py` 列出。
+- **仓库身份现状**:当前仍以 `full_name` 为主键;API 补全已保存 `repo_id`/`node_id`/canonical 名。2026-09-01 已确认公共 `github_events` 表只有 `repo_name`、没有 repository ID，因此按迁移约束暂停 identity v2 历史合并，绝不按名称猜测。同名复用/改名仓库(如 `Jarred-Sumner/bun`)在可获得稳定 ID 的历史源前统计仍标为不可信，可用 `python scripts/audit_data.py` 列出。
 
 ## 部署每日任务(GitHub Actions)
 

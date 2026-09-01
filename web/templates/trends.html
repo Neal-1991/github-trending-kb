@@ -7,9 +7,13 @@
 <p class="muted">注意:「其他」中含大量 2023 年后创建但缺元数据的仓库(元数据快照截至 2022-07),语言份额仅 2021-2022 可靠;配置 GitHub PAT 补全后将自动改善。</p>
 {{ stacked|safe }}
 
-<h2>持久霸榜王(Top10 天数 ≥ 10)</h2>
+<h2>持久霸榜王(Top10 天数 ≥ 10,历史重建榜口径)</h2>
+<div class="table-wrap">
 <table>
-  <tr><th>仓库</th><th>Top10 天数</th><th>上榜总天数</th><th>最高名次</th><th>首次上榜</th><th>语言</th></tr>
+  <caption class="visually-hidden">持久霸榜项目</caption>
+  <thead>
+  <tr><th scope="col">仓库</th><th scope="col">Top10 天数</th><th scope="col">上榜总天数</th><th scope="col">最高名次</th><th scope="col">首次上榜</th><th scope="col">语言</th></tr>
+  </thead>
   {% for r in persistent %}
   <tr>
     <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
@@ -20,12 +24,18 @@
 </table>
 
 <h2>现象级单日爆发(数据完整期)</h2>
+<p class="muted">单日星标 ≥ 15000 的记录疑似刷星,默认不在此展示(raw 数据保留在项目详情)。</p>
+<div class="table-wrap">
 <table>
-  <tr><th>日期</th><th>仓库</th><th>单日星标</th></tr>
+  <caption class="visually-hidden">单日爆发事件</caption>
+  <thead>
+  <tr><th scope="col">日期</th><th scope="col">仓库</th><th scope="col">单日星标</th></tr>
+  </thead>
   {% for r in spikes %}
   <tr><td>{{ r.date }}</td><td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td><td>{{ r.stars }}</td></tr>
   {% endfor %}
 </table>
+</div>
 
 <h2>数据质量时间线</h2>
 <p class="muted">GH Archive 公共源按月摄入密度:full=完整,partial=降级(Top10 仍可用)。</p>

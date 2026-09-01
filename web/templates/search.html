@@ -3,8 +3,10 @@
 {% block content %}
 <h1>检索</h1>
 <form method="get" action="/search" class="search-form">
-  <input type="search" name="q" value="{{ q }}" placeholder="关键词,如 agent / 数据库 / agent 框架">
-  <select name="lang">
+  <label class="visually-hidden" for="q">关键词</label>
+  <input id="q" type="search" name="q" value="{{ q }}" placeholder="关键词,如 agent / 数据库 / agent 框架">
+  <label class="visually-hidden" for="lang">语言</label>
+  <select id="lang" name="lang">
     <option value="">全部语言</option>
     {% for l in langs %}
     <option value="{{ l.language }}" {% if l.language == sel_lang %}selected{% endif %}>
@@ -15,9 +17,15 @@
   <button type="submit">搜索</button>
 </form>
 
-<p class="muted">{{ rows|length }} 条结果{% if q %}(相关度排序){% else %}(按上榜热度){% endif %}</p>
+<p class="muted">共 {{ total }} 条结果 · {{ sort_label }}
+  {% if pages > 1 %}· 第 {{ page }}/{{ pages }} 页{% endif %}</p>
+<div class="table-wrap">
 <table>
-  <tr><th>仓库</th><th>语言</th><th>Top10 天数</th><th>首次上榜</th><th>画像</th></tr>
+  <caption class="visually-hidden">搜索结果列表</caption>
+  <thead>
+  <tr><th scope="col">仓库</th><th scope="col">语言</th><th scope="col">Top10 天数</th><th scope="col">首次上榜</th><th scope="col">画像</th></tr>
+  </thead>
+  <tbody>
   {% for r in rows %}
   <tr>
     <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a>
@@ -28,6 +36,18 @@
     <td>{{ r.first_trend_date or "—" }}</td>
     <td>{% if r.one_liner %}✅{% else %}—{% endif %}</td>
   </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">没有匹配的项目:试试更短的关键词,或清除语言/画像筛选。</td></tr>
   {% endfor %}
+  </tbody>
 </table>
+</div>
+
+{% if pages > 1 %}
+<nav class="pager" aria-label="分页">
+  {% if page > 1 %}<a href="/search?q={{ q }}&lang={{ sel_lang }}&has_profile={{ has_profile }}&page={{ page - 1 }}&per_page={{ per_page }}">← 上一页</a>{% endif %}
+  <span class="muted">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="/search?q={{ q }}&lang={{ sel_lang }}&has_profile={{ has_profile }}&page={{ page + 1 }}&per_page={{ per_page }}">下一页 →</a>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}

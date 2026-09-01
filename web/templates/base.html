@@ -7,16 +7,18 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<nav>
+<a class="skip-link" href="#main">跳到正文</a>
+<nav aria-label="站点导航">
   <a class="brand" href="/">📈 趋势榜知识库</a>
-  <a href="/search">检索</a>
-  <a href="/trends">趋势图谱</a>
-  <a href="/browse">按日浏览</a>
-  <form action="/search" method="get" class="nav-search">
-    <input type="search" name="q" placeholder="搜索项目 / 画像 (中文可用)…" value="{{ q or '' }}">
+  <a href="/search" {% if request.url.path == '/search' %}aria-current="page"{% endif %}>检索</a>
+  <a href="/trends" {% if request.url.path == '/trends' %}aria-current="page"{% endif %}>趋势图谱</a>
+  <a href="/browse" {% if request.url.path == '/browse' %}aria-current="page"{% endif %}>按日浏览</a>
+  <form action="/search" method="get" class="nav-search" role="search">
+    <input type="search" name="q" aria-label="搜索项目或画像"
+           placeholder="搜索项目 / 画像 (中文可用)…" value="{{ q or '' }}">
   </form>
 </nav>
-<main>
+<main id="main">
 {% block content %}{% endblock %}
 </main>
 <footer>GitHub 趋势榜知识库 · 本地检索,不依赖 LLM · 数据来源:GH Archive 重建榜 + 每日真实榜单</footer>

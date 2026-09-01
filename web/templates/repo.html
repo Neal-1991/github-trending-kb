@@ -39,12 +39,17 @@
 <h2>历史趋势(Top10 内单日星标)</h2>
 {% if spark %}{{ spark|safe }}{% else %}<p class="muted">无曲线数据</p>{% endif %}
 {% if trend %}
+<div class="table-wrap">
 <table>
-  <tr><th>日期</th><th>当日新增星标</th></tr>
+  <caption class="visually-hidden">Top10 内单日星标</caption>
+  <thead>
+  <tr><th scope="col">日期</th><th scope="col">当日新增星标</th></tr>
+  </thead>
   {% for t in trend %}
   <tr><td>{{ t.date }}</td><td>{{ t.stars }}</td></tr>
   {% endfor %}
 </table>
 {% endif %}
+</div>
 <p class="muted">Top50 全量观测 {{ all_count }} 天</p>
 {% endblock %}

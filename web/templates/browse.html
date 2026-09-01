@@ -3,12 +3,20 @@
 {% block content %}
 <h1>按日浏览</h1>
 <form method="get" class="search-form">
-  <select name="list_type">
+  <label class="visually-hidden" for="list_type">榜单</label>
+  <select id="list_type" name="list_type">
     {% for l in lists %}
     <option value="{{ l.list_type }}" {% if l.list_type == list_type %}selected{% endif %}>{{ l.list_type }}</option>
     {% endfor %}
   </select>
-  <select name="d">
+  <label class="visually-hidden" for="month">月份</label>
+  <select id="month" name="month">
+    {% for m in months %}
+    <option value="{{ m.m }}" {% if m.m == month %}selected{% endif %}>{{ m.m }}</option>
+    {% endfor %}
+  </select>
+  <label class="visually-hidden" for="d">日期</label>
+  <select id="d" name="d">
     {% for dd in dates %}
     <option value="{{ dd.date }}" {% if dd.date == d %}selected{% endif %}>{{ dd.date }}</option>
     {% endfor %}
@@ -16,9 +24,15 @@
   <button type="submit">查看</button>
 </form>
 
+{% if fallback_note %}<p class="notice">所选日期/榜单无数据,已回退到该榜单最新的有效日期。</p>{% endif %}
 <h2>{{ d }} · {{ list_type }}</h2>
+<div class="table-wrap">
 <table>
-  <tr><th>#</th><th>仓库</th><th>当日新增星标</th><th>数据质量</th></tr>
+  <caption class="visually-hidden">当日榜单</caption>
+  <thead>
+  <tr><th scope="col">#</th><th scope="col">仓库</th><th scope="col">当日新增星标</th><th scope="col">数据质量</th></tr>
+  </thead>
+  <tbody>
   {% for r in rows %}
   <tr>
     <td>{{ r.rank }}</td>
@@ -26,6 +40,10 @@
     <td>{{ r.stars }}</td>
     <td>{% if r.quality == 'partial' %}<span class="badge warn">partial</span>{% else %}{{ r.quality or "" }}{% endif %}</td>
   </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">该日期无榜单数据。</td></tr>
   {% endfor %}
+  </tbody>
 </table>
+</div>
 {% endblock %}

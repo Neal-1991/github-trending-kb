@@ -24,8 +24,12 @@
 {% endif %}
 
 <h2>最近新面孔</h2>
+<div class="table-wrap">
 <table>
-  <tr><th>仓库</th><th>首次上榜</th><th>语言</th><th>单日峰值</th><th>说明</th></tr>
+  <caption class="visually-hidden">最近首次上榜的项目</caption>
+  <thead>
+  <tr><th scope="col">仓库</th><th scope="col">首次上榜</th><th scope="col">语言</th><th scope="col">单日峰值</th><th scope="col">说明</th></tr>
+  </thead>
   {% for r in new_faces %}
   <tr>
     <td><a href="/repo/{{ r.full_name }}">{{ r.full_name }}</a></td>
@@ -36,6 +40,7 @@
   </tr>
   {% endfor %}
 </table>
+</div>
 
 <div class="notice muted-note">已知数据缺口:GH Archive 公共数据源在 <b>2026-02 之后</b>摄入降级,
 该区间历史重建缺榜,由每日真实榜单自 2026-08-30 起接力补齐。</div>

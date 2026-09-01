@@ -88,19 +88,46 @@ def build_weekly_card(date_str: str, summary: dict) -> dict:
     }
 
 
-def send(card: dict) -> tuple[bool, str]:
-    """webhook 优先,未配置时走自建应用。"""
-    if FEISHU_WEBHOOK:
-        r = requests.post(FEISHU_WEBHOOK, json=card, timeout=30)
+def _post_with_retry(url: str, *, attempts: int = 3, timeout: int = 30, **kw) -> requests.Response:
+    """统一 POST:网络异常/429/5xx 指数退避重试;429 尊重 Retry-After。"""
+    import time as _time
+    delay = 2
+    for attempt in range(1, attempts + 1):
         try:
-            resp = r.json()
-        except ValueError:
-            return False, f"HTTP {r.status_code}: {r.text[:200]}"
+            r = requests.post(url, timeout=timeout, **kw)
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                wait = int(r.headers.get("Retry-After") or 0) or delay
+                print(f"  [feishu] HTTP {r.status_code}, retry in {wait}s (attempt {attempt})")
+                _time.sleep(min(wait, 60))
+                delay *= 2
+                continue
+            return r
+        except requests.RequestException as e:
+            if attempt == attempts:
+                raise
+            print(f"  [feishu] network error: {e}, retry in {delay}s (attempt {attempt})")
+            _time.sleep(delay)
+            delay *= 2
+    raise requests.RequestException(f"unreachable after {attempts} attempts: {url}")
+
+
+def _resp_json(r: requests.Response) -> dict:
+    try:
+        return r.json()
+    except ValueError:
+        return {"code": -1, "msg": f"non-JSON response: HTTP {r.status_code} {r.text[:200]}"}
+
+
+def send(card: dict) -> tuple[bool, str, str | None]:
+    """webhook 优先,未配置时走自建应用。返回 (ok, msg, message_id)。"""
+    if FEISHU_WEBHOOK:
+        r = _post_with_retry(FEISHU_WEBHOOK, json=card, timeout=30)
+        resp = _resp_json(r)
         ok = (resp.get("StatusCode") == 0) or (resp.get("code") == 0)
-        return ok, json.dumps(resp, ensure_ascii=False)
+        return ok, json.dumps(resp, ensure_ascii=False), None
     if FEISHU_APP_ID and FEISHU_APP_SECRET and (FEISHU_OPEN_ID or FEISHU_CHAT_ID):
         return send_via_app(card)
-    return False, "FEISHU_WEBHOOK / FEISHU_APP_* 均未配置"
+    return False, "FEISHU_WEBHOOK / FEISHU_APP_* 均未配置", None
 
 
 _token_cache: dict = {}
@@ -111,10 +138,10 @@ def _tenant_access_token() -> str:
     exp = _token_cache.get("expire", 0)
     if tok and time.time() < exp - 120:
         return tok
-    r = requests.post(
+    r = _post_with_retry(
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
         json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}, timeout=30)
-    data = r.json()
+    data = _resp_json(r)
     if data.get("code") != 0:
         raise RuntimeError(f"获取 tenant_access_token 失败: {data}")
     _token_cache["token"] = data["tenant_access_token"]
@@ -122,7 +149,7 @@ def _tenant_access_token() -> str:
     return data["tenant_access_token"]
 
 
-def send_via_app(card: dict) -> tuple[bool, str]:
+def send_via_app(card: dict) -> tuple[bool, str, str | None]:
     """自建应用通道:im/v1/messages 发交互卡片(私聊 open_id 或群 chat_id)。"""
     receive_id = FEISHU_CHAT_ID or FEISHU_OPEN_ID
     id_type = "chat_id" if FEISHU_CHAT_ID else "open_id"
@@ -131,19 +158,23 @@ def send_via_app(card: dict) -> tuple[bool, str]:
         "msg_type": "interactive",
         "content": json.dumps(card["card"], ensure_ascii=False),
     }
-    r = requests.post(
-        "https://open.feishu.cn/open-apis/im/v1/messages",
-        params={"receive_id_type": id_type},
-        json=payload, timeout=30,
-        headers={"Authorization": f"Bearer {_tenant_access_token()}"},
-    )
-    data = r.json()
+    try:
+        r = _post_with_retry(
+            "https://open.feishu.cn/open-apis/im/v1/messages",
+            params={"receive_id_type": id_type},
+            json=payload, timeout=30,
+            headers={"Authorization": f"Bearer {_tenant_access_token()}"},
+        )
+    except requests.RequestException as e:
+        return False, f"network: {e}", None
+    data = _resp_json(r)
     code = data.get("code")
     if code == 0:
-        return True, "sent via app"
+        message_id = (data.get("data") or {}).get("message_id")
+        return True, "sent via app", message_id
     if code in (99991663, 99991661, 99991668):  # token 类错误:清缓存便于重试
         _token_cache.clear()
-    return False, f"{code}: {data.get('msg')} {json.dumps(data.get('error'), ensure_ascii=False)[:200]}"
+    return False, f"{code}: {data.get('msg')} {json.dumps(data.get('error'), ensure_ascii=False)[:200]}", None
 
 
 def card_to_markdown(card: dict) -> str:

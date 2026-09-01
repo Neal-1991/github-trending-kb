@@ -8,11 +8,9 @@ import sys
 import time
 from pathlib import Path
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_OPEN_ID
-from scripts.feishu import _tenant_access_token
+from scripts.feishu import _post_with_retry, _resp_json, _tenant_access_token
 
 API = "https://open.feishu.cn/open-apis"
 
@@ -21,15 +19,21 @@ class DocScopeError(RuntimeError):
     """应用缺少云文档相关权限。"""
 
 
+def _doc_api_post(url: str, *, attempts: int = 3, **kw) -> dict:
+    """doc/drive API 统一 POST:重试 + 非 JSON 保护;4xx 业务错误抛 DocScopeError。"""
+    r = _post_with_retry(url, attempts=attempts, **kw)
+    data = _resp_json(r)
+    if data.get("code") != 0:
+        raise DocScopeError(f"飞书文档接口失败({data.get('code')}): {data.get('msg')}")
+    return data
+
+
 def create_doc(title: str) -> dict:
-    r = requests.post(
+    data = _doc_api_post(
         f"{API}/docx/v1/documents",
-        json={"folder_token": ""}, timeout=30,
+        json={"title": title, "folder_token": ""}, timeout=30,
         headers={"Authorization": f"Bearer {_tenant_access_token()}"},
     )
-    data = r.json()
-    if data.get("code") != 0:
-        raise DocScopeError(f"创建文档失败({data.get('code')}): {data.get('msg')}")
     doc = data["data"]["document"]
     return {"document_id": doc["document_id"],
             "url": f"https://feishu.cn/docx/{doc['document_id']}"}
@@ -67,29 +71,23 @@ def add_blocks(doc_id: str, blocks: list, batch: int = 45) -> None:
     headers = {"Authorization": f"Bearer {_tenant_access_token()}"}
     for i in range(0, len(blocks), batch):
         chunk = blocks[i:i + batch]
-        r = requests.post(
+        _doc_api_post(
             f"{API}/docx/v1/documents/{doc_id}/blocks/{doc_id}/children",
             params={"document_revision_id": -1},
             json={"index": -1, "children": chunk},
             timeout=30, headers=headers,
         )
-        data = r.json()
-        if data.get("code") != 0:
-            raise DocScopeError(f"写入文档块失败({data.get('code')}): {data.get('msg')}")
         time.sleep(0.3)
 
 
 def grant_access(doc_id: str, open_id: str) -> None:
-    r = requests.post(
+    _doc_api_post(
         f"{API}/drive/v1/permissions/{doc_id}/members",
         params={"type": "docx", "need_notification": "true"},
         json={"member_type": "openid", "member_id": open_id, "perm": "full_access"},
         timeout=30,
         headers={"Authorization": f"Bearer {_tenant_access_token()}"},
     )
-    data = r.json()
-    if data.get("code") != 0:
-        raise DocScopeError(f"文档授权失败({data.get('code')}): {data.get('msg')}")
 
 
 # ---------- 内容构建 ----------
@@ -162,8 +160,6 @@ def build_daily_blocks(date_str: str, records: list[dict], profiles: dict, conn)
             tags.append(meta["language"])
         if meta.get("license"):
             tags.append(f"License: {meta['license']}")
-        if tags:
-            head_runs.append(_run("  | " + " | ".join(tags)))
         if tags:
             head_runs.append(_run("  | " + " | ".join(tags)))
         blocks.append(_block(5, "heading3", head_runs))

@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 data/trending.db
+data/trending.db.*.tmp
 data/readmes/
+data/diagnostics/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/

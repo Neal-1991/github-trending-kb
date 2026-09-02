@@ -5,27 +5,28 @@
 <form method="get" class="search-form">
   <label class="visually-hidden" for="list_type">榜单</label>
   <select id="list_type" name="list_type">
-    {% for l in lists %}
-    <option value="{{ l.list_type }}" {% if l.list_type == list_type %}selected{% endif %}>{{ l.list_type }}</option>
+    {% for l in list_options %}
+    <option value="{{ l.value }}" {% if l.value == list_type %}selected{% endif %}>{{ l.label }}</option>
     {% endfor %}
   </select>
   <label class="visually-hidden" for="month">月份</label>
   <select id="month" name="month">
     {% for m in months %}
-    <option value="{{ m.m }}" {% if m.m == month %}selected{% endif %}>{{ m.m }}</option>
+    <option value="{{ m }}" {% if m == month %}selected{% endif %}>{{ m }}</option>
     {% endfor %}
   </select>
   <label class="visually-hidden" for="d">日期</label>
   <select id="d" name="d">
     {% for dd in dates %}
-    <option value="{{ dd.date }}" {% if dd.date == d %}selected{% endif %}>{{ dd.date }}</option>
+    <option value="{{ dd }}" {% if dd == d %}selected{% endif %}>{{ dd }}</option>
     {% endfor %}
   </select>
   <button type="submit">查看</button>
 </form>
 
-{% if fallback_note %}<p class="notice">所选日期/榜单无数据,已回退到该榜单最新的有效日期。</p>{% endif %}
-<h2>{{ d }} · {{ list_type }}</h2>
+{% if fallback_note %}<p class="notice">所选日期/榜单无数据,已回退到最接近的有效日期。</p>{% endif %}
+{% if gap_note %}<p class="notice">{{ gap_note }}</p>{% endif %}
+<h2>{{ d }} · {{ list_type_label }}</h2>
 <div class="table-wrap">
 <table>
   <caption class="visually-hidden">当日榜单</caption>

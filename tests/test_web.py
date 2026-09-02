@@ -89,8 +89,10 @@ def test_browse_defaults_to_globally_latest_day(client):
     r = client.get("/browse")
     assert r.status_code == 200
     assert "2026-09-01" in r.text
-    # 默认定位不是回退,不显示回退提示
+    assert "真实抓取榜" in r.text
+    # 默认定位不是回退,不显示回退提示;数据缺口有明确说明
     assert "已回退" not in r.text
+    assert "暂无数据" in r.text
 
 
 def test_browse_explicit_arch_total_still_reaches_history(client):
@@ -98,6 +100,21 @@ def test_browse_explicit_arch_total_still_reaches_history(client):
     r = client.get("/browse", params={"list_type": "arch:total"})
     assert r.status_code == 200
     assert "2022-04-01" in r.text
+    assert "历史重建榜" in r.text
+
+
+def test_browse_date_axis_spans_both_sources(client):
+    """日期轴合并历史档与真实榜:选历史日期应落到历史重建榜。"""
+    r = client.get("/browse", params={"d": "2022-03-01"})
+    assert r.status_code == 200
+    assert "2022-03-01" in r.text
+    assert "arch:total" in r.text
+
+
+def test_browse_month_with_explicit_type(client):
+    r = client.get("/browse", params={"list_type": "arch:total", "month": "2022-03"})
+    assert r.status_code == 200
+    assert "2022-03-02" in r.text
 
 
 def test_xss_language_escaped(client):

@@ -16,6 +16,7 @@ import html
 import json
 import sqlite3
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -247,61 +248,117 @@ def repo_detail(request: Request, full_name: str,
     })
 
 
+_LANG_DISPLAY = {"python": "Python", "javascript": "JavaScript",
+                 "typescript": "TypeScript", "rust": "Rust"}
+
+
+def _list_type_label(list_type: str) -> str:
+    """榜单类型的中文标注,让历史档/真实榜在下拉框里一眼可辨。"""
+    if list_type == "total":
+        return "真实抓取榜 · total"
+    if list_type == "arch:total":
+        return "历史重建榜 · arch:total"
+    if list_type.startswith("arch:lang:"):
+        lang = list_type[len("arch:lang:"):]
+        return f"历史语言榜 · {_LANG_DISPLAY.get(lang, lang.capitalize())}"
+    if list_type.startswith("lang:"):
+        lang = list_type[len("lang:"):]
+        return f"真实语言榜 · {_LANG_DISPLAY.get(lang, lang.capitalize())}"
+    return list_type
+
+
 @app.get("/browse", response_class=HTMLResponse)
 def browse(request: Request, conn: sqlite3.Connection = Depends(get_db),
            d: str = "", list_type: str = "", month: str = ""):
-    lists = conn.execute(
-        "SELECT DISTINCT list_type FROM trend_daily ORDER BY list_type").fetchall()
-    valid_types = {r["list_type"] for r in lists}
+    # 日期轴 = 历史重建榜 ∪ 真实抓取榜(两类日期不重叠;语言榜与同日 total 共用日期)。
+    all_dates = [r["date"] for r in conn.execute(
+        "SELECT DISTINCT date FROM trend_daily "
+        "WHERE list_type IN ('arch:total','total') ORDER BY date DESC")]
+    months = sorted({x[:7] for x in all_dates}, reverse=True)
     fallback_note = False
-    if not list_type:
-        # 默认视图:全局最新日期所在的榜单(真实抓取日优先于历史重建档,
-        # 否则 arch:total 只到 ARCH_END,会让人误以为数据停在 1 月)
-        row = conn.execute("""
-          SELECT list_type FROM trend_daily
-          WHERE date = (SELECT MAX(date) FROM trend_daily)
-          ORDER BY CASE WHEN list_type='total' THEN 0 ELSE 1 END, list_type
-          LIMIT 1""").fetchone()
-        list_type = row["list_type"] if row else "arch:total"
-    elif list_type not in valid_types:
-        list_type = "arch:total" if "arch:total" in valid_types else (
-            sorted(valid_types)[0] if valid_types else list_type)
+
+    def latest_day_of(list_type_: str) -> str | None:
+        return conn.execute("SELECT MAX(date) m FROM trend_daily WHERE list_type=?",
+                            (list_type_,)).fetchone()["m"]
+
+    def types_at(day: str) -> list[str]:
+        return [r["list_type"] for r in conn.execute(
+            """SELECT DISTINCT list_type FROM trend_daily WHERE date=?
+               ORDER BY CASE WHEN list_type='total' THEN 0
+                              WHEN list_type='arch:total' THEN 1 ELSE 2 END, list_type""",
+            (day,))]
+
+    known_types = {r["list_type"] for r in conn.execute(
+        "SELECT DISTINCT list_type FROM trend_daily")}
+    explicit_type = list_type if list_type in known_types else ""
+    if d and d not in all_dates:
         fallback_note = True
+        d = ""
 
-    def date_exists(date_str: str) -> bool:
-        return bool(conn.execute(
-            "SELECT 1 FROM trend_daily WHERE date=? AND list_type=? LIMIT 1",
-            (date_str, list_type)).fetchone())
+    if explicit_type:
+        # 榜单主导:显式月份 > 显式日期 > 该榜全局最新日
+        if month in months:
+            d = conn.execute(
+                "SELECT MAX(date) m FROM trend_daily WHERE list_type=? AND substr(date,1,7)=?",
+                (explicit_type, month)).fetchone()["m"] or ""
+            if not d:
+                fallback_note = True
+                d = latest_day_of(explicit_type) or ""
+        elif not d:
+            d = latest_day_of(explicit_type) or ""
+    elif not d:
+        # 日期主导:显式月份 > 全局最新日
+        if month in months:
+            d = next((x for x in all_dates if x.startswith(month)), "")
+        else:
+            d = all_dates[0] if all_dates else ""
 
-    max_date = conn.execute(
-        "SELECT MAX(date) m FROM trend_daily WHERE list_type=?", (list_type,)).fetchone()["m"]
-    if not d or not date_exists(d):
-        fallback_note = fallback_note or bool(d)  # 默认定位最新日不算回退,显式无效日期才提示
-        d = max_date or d
+    if not d:  # 空库兜底
+        return templates.TemplateResponse(request, "browse.html", {
+            "d": "", "list_type": list_type or "arch:total",
+            "list_type_label": list_type or "arch:total", "rows": [], "dates": [],
+            "list_options": [], "months": months, "month": month,
+            "fallback_note": fallback_note, "gap_note": ""})
 
-    months = conn.execute("""
-      SELECT DISTINCT substr(date,1,7) m FROM trend_daily WHERE list_type=?
-      ORDER BY m DESC
-    """, (list_type,)).fetchall()
-    valid_months = {r["m"] for r in months}
-    month_filter = month if month in valid_months else d[:7]
-    if not date_exists(d):  # 月份切换后原日期不在该月,取该月最新一天
-        latest_in_month = conn.execute("""
-          SELECT MAX(date) m FROM trend_daily WHERE list_type=? AND substr(date,1,7)=?
-        """, (list_type, month_filter)).fetchone()["m"]
-        if latest_in_month:
-            d = latest_in_month
-    dates = conn.execute("""
-      SELECT DISTINCT date FROM trend_daily
-      WHERE list_type=? AND substr(date,1,7)=? ORDER BY date DESC
-    """, (list_type, month_filter)).fetchall()
+    day_types = types_at(d)
+    if explicit_type and explicit_type in day_types:
+        list_type = explicit_type
+    elif day_types:
+        if explicit_type:
+            fallback_note = True  # 显式榜单在该日期无数据,回退当日可用榜单
+        list_type = day_types[0]
+    else:
+        list_type = list_type or "arch:total"
+
+    month_filter = d[:7]
+    month_dates = [x for x in all_dates if x.startswith(month_filter)]
     rows = conn.execute("""
       SELECT rank, full_name, stars, quality FROM trend_daily
       WHERE date = ? AND list_type = ? ORDER BY rank
     """, (d, list_type)).fetchall()
+
+    # 数据缺口提示:历史重建榜末日与真实抓取榜首日之间的空洞(ARCH_END 之后源数据崩坏)
+    gap_note = ""
+    arch_span = conn.execute(
+        "SELECT MIN(date) a, MAX(date) b FROM trend_daily WHERE list_type='arch:total'"
+    ).fetchone()
+    real_min = conn.execute(
+        "SELECT MIN(date) m FROM trend_daily WHERE list_type='total'").fetchone()["m"]
+    if arch_span["b"] and real_min:
+        missing = (date.fromisoformat(real_min) - date.fromisoformat(arch_span["b"])).days - 1
+        if missing > 0:
+            gap_start = (date.fromisoformat(arch_span["b"]) + timedelta(days=1)).isoformat()
+            gap_end = (date.fromisoformat(real_min) - timedelta(days=1)).isoformat()
+            gap_note = (f"历史重建榜覆盖 {arch_span['a']} ~ {arch_span['b']},"
+                        f"真实抓取榜自 {real_min} 起;"
+                        f"{gap_start} ~ {gap_end}({missing} 天)暂无数据。")
+
     return templates.TemplateResponse(request, "browse.html", {
-        "d": d, "list_type": list_type, "rows": rows, "dates": dates, "lists": lists,
+        "d": d, "list_type": list_type, "list_type_label": _list_type_label(list_type),
+        "rows": rows, "dates": month_dates, "list_options": [
+            {"value": t, "label": _list_type_label(t)} for t in day_types],
         "months": months, "month": month_filter, "fallback_note": fallback_note,
+        "gap_note": gap_note,
     })
 
 

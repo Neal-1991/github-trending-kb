@@ -134,6 +134,8 @@ def main():
     ap.add_argument("--refresh-stale", action="store_true",
                     help="刷新 TTL 过期的核心仓库(含 repo_gone,可发现恢复/迁移)")
     ap.add_argument("--ttl-days", type=int, default=DEFAULT_TTL_DAYS)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="限制本轮最多抓取的仓库数(0 = 本轮不抓取,避免单次触发限流)")
     args = ap.parse_args()
     if not GITHUB_TOKEN:
         print("GITHUB_TOKEN 未配置(.env),无法调用 GitHub API。")
@@ -162,6 +164,8 @@ def main():
         todo = [n for n in todo if n not in done and n not in gone]
         mode = "backfill-missing"
 
+    if args.limit is not None:
+        todo = todo[:max(args.limit, 0)]
     print(f"mode={mode}, to enrich: {len(todo)}")
 
     ok = gone = 0

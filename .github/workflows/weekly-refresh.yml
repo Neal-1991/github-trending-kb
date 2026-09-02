@@ -1,0 +1,86 @@
+name: weekly-metadata-refresh
+
+on:
+  schedule:
+    - cron: "0 3 * * 6" # 每周六 UTC 03:00 = 北京时间 11:00
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: weekly-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90 # 配额耗尽时 enrich 内部最长休眠约 62 分钟
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.lock
+
+      # SQLite 是派生索引不进 git,enrich 查询 repos 表前必须先重建(与 daily.yml 一致)
+      - name: Rebuild DB from snapshots
+        run: python scripts/build_db.py
+
+      - name: Refresh stale repo metadata
+        env:
+          # 优先用 PAT(额度更高),否则回退 Actions 内置 token
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || github.token }}
+        run: python scripts/enrich_github_api.py --refresh-stale --limit 800
+
+      - name: Commit refreshed metadata
+        run: |
+          git config user.name "trending-kb-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data/raw/repo_meta_api.jsonl data/raw/repo_gone.jsonl
+          if git diff --cached --quiet; then
+            echo "no changes"
+          else
+            git commit -m "weekly metadata refresh"
+            for i in 1 2 3; do
+              if git pull --rebase --autostash origin main && git push; then break; fi
+              git rebase --abort || true
+              if [ "$i" = "3" ]; then exit 1; fi
+              sleep 10
+            done
+          fi
+
+      - name: Alert refresh failure to Feishu
+        if: failure()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_OPEN_ID: ${{ secrets.FEISHU_OPEN_ID }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, ".")
+          from scripts.feishu import send
+          run_url = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          card = {
+              "msg_type": "interactive",
+              "card": {
+                  "config": {"wide_screen_mode": True},
+                  "header": {"template": "red", "title": {"tag": "plain_text",
+                              "content": "⚠️ 趋势榜 weekly refresh 失败"}},
+                  "elements": [
+                      {"tag": "div", "text": {"tag": "lark_md",
+                       "content": f"元数据 TTL 刷新阶段失败,本次变更未提交。"
+                                  f"请查看[运行日志]({run_url})。"}},
+                  ],
+              },
+          }
+          ok, msg, _ = send(card)
+          print(f"alert ok={ok} resp={msg}")
+          PY

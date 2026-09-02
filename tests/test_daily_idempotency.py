@@ -238,3 +238,27 @@ def test_profile_truncation_is_logged(sandbox, no_network, monkeypatch, capsys):
     daily_job.profile_new_repos(["owner0/repo0", "owner1/repo1"], dry_run=False, conn=conn)
     assert "超过单轮上限" in capsys.readouterr().out
     conn.close()
+
+
+def test_doc_mode_creates_doc_and_sends_link(sandbox, no_network, monkeypatch):
+    """doc 模式成功路径:创建文档→发链接卡片→落 created/link_sent/sent 事件。
+
+    回归:generate_doc 曾返回纯字符串导致调用方 TypeError
+    (2026-09-02 生产 Job B 首跑即因此失败)。
+    """
+    date = "2026-09-01"
+    monkeypatch.setattr(daily_job, "FEISHU_APP_ID", "app")
+    monkeypatch.setattr(daily_job, "FEISHU_APP_SECRET", "sec")
+    monkeypatch.setattr(daily_job.feishu_doc, "generate_doc", staticmethod(
+        lambda *a, **k: {"document_id": "doc-9", "url": "https://feishu.cn/docx/doc-9"}))
+    conn = rebuild()
+    records = _records()
+    daily_job.push_daily(conn, date, records, {}, "sha256:doc1")
+    assert no_network["send"] == 1
+    assert delivery_log.latest_event("daily_doc", date)["status"] == "link_sent"
+    assert delivery_log.latest_event(
+        "daily_message", date, snapshot_id="sha256:doc1")["status"] == "sent"
+    # 重跑幂等:最终状态已 sent,不再发第二条
+    daily_job.push_daily(conn, date, records, {}, "sha256:doc1")
+    assert no_network["send"] == 1
+    conn.close()

@@ -127,7 +127,10 @@ jobs:
         run: |
           git config user.name "trending-kb-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add data/daily/delivery_log.jsonl data/daily/push_log.jsonl
+          # delivery_log.jsonl 在通知首次成功写事件前可能不存在,容忍缺失
+          for f in data/daily/delivery_log.jsonl data/daily/push_log.jsonl; do
+            [ -f "$f" ] && git add "$f"
+          done
           if git diff --cached --quiet; then
             echo "no changes"
           else

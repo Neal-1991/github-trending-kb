@@ -209,10 +209,10 @@ def build_weekly_blocks(date_str: str, summary: dict, profiles: dict) -> list[di
     return blocks
 
 
-def generate_doc(title: str, blocks: list[dict], open_id: str = "") -> str:
-    """创建文档→写入→授权,返回文档 URL。"""
+def generate_doc(title: str, blocks: list[dict], open_id: str = "") -> dict:
+    """创建文档→写入→授权,返回 {"document_id", "url"}(调用方按 dict 消费)。"""
     doc = create_doc(title)
     add_blocks(doc["document_id"], blocks)
     if open_id:
         grant_access(doc["document_id"], open_id)
-    return doc["url"]
+    return doc

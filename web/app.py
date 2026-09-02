@@ -10,7 +10,8 @@ SQLite FTS5 全文检索,不依赖任何 LLM。
 - 返回真实总数与分页(默认 30,最大 100),排序模式如实标注;
 - (list_type, date) 无数据时回退该榜最新日期并提示;
 - 数据库只读连接(request 级),缺库明确失败,不创建空库;
-- 动态 SVG 文本全部转义;homepage 仅允许 http/https。
+- 动态 SVG 文本全部转义;homepage 仅允许 http/https;
+- 只读 JSON API:/api/search、/api/repo/{full_name}、/api/day/{date} 与 HTML 同口径。
 """
 import html
 import json
@@ -151,11 +152,13 @@ def index(request: Request, conn: sqlite3.Connection = Depends(get_db)):
     })
 
 
-@app.get("/search", response_class=HTMLResponse)
-def search(request: Request, conn: sqlite3.Connection = Depends(get_db),
-           q: str = Query("", max_length=200),
-           lang: str = "", has_profile: str = "",
-           page: int = Query(1, ge=1), per_page: int = Query(30, ge=1, le=100)):
+def search_repos(conn: sqlite3.Connection, q: str, lang: str = "",
+                 has_profile: str = "", page: int = 1, per_page: int = 30) -> dict:
+    """检索核心(HTML /search 与 JSON /api/search 共用):解析 q、拼 SQL、取 rows 与分页。
+
+    返回 total/pages/rows 等字典;含控制字符等非法输入由 parse_query 抛 422。
+    rows 为 sqlite3.Row(fts 模式额外含 bm25 score 列)。
+    """
     pq = parse_query(q)
     filters, filter_params = [], []
     if lang:
@@ -197,17 +200,29 @@ def search(request: Request, conn: sqlite3.Connection = Depends(get_db),
     sql = (f"SELECT {select_cols} FROM {from_clause}{where_clause} "
            f"ORDER BY {order} LIMIT ? OFFSET ?")
     rows = conn.execute(sql, match_params + filter_params + [per_page, (page - 1) * per_page]).fetchall()
+    pages = max(1, -(-count // per_page))
+    return {"q": q, "mode": pq.mode, "sort_label": SORT_LABELS[pq.mode],
+            "total": count, "page": page, "pages": pages, "per_page": per_page,
+            "rows": rows}
 
+
+@app.get("/search", response_class=HTMLResponse)
+def search(request: Request, conn: sqlite3.Connection = Depends(get_db),
+           q: str = Query("", max_length=200),
+           lang: str = "", has_profile: str = "",
+           page: int = Query(1, ge=1), per_page: int = Query(30, ge=1, le=100)):
+    res = search_repos(conn, q, lang=lang, has_profile=has_profile,
+                       page=page, per_page=per_page)
+    # langs 下拉数据仅 HTML 页面需要,单独查询
     langs = conn.execute("""
       SELECT language, count(*) n FROM repos
       WHERE language IS NOT NULL GROUP BY language ORDER BY n DESC LIMIT 15
     """).fetchall()
-    pages = max(1, -(-count // per_page))
     return templates.TemplateResponse(request, "search.html", {
-        "q": q, "rows": rows, "langs": langs, "sel_lang": lang,
-        "has_profile": has_profile, "total": count, "page": page,
-        "pages": pages, "per_page": per_page, "mode": pq.mode,
-        "sort_label": SORT_LABELS[pq.mode],
+        "q": res["q"], "rows": res["rows"], "langs": langs, "sel_lang": lang,
+        "has_profile": has_profile, "total": res["total"], "page": res["page"],
+        "pages": res["pages"], "per_page": res["per_page"], "mode": res["mode"],
+        "sort_label": res["sort_label"],
     })
 
 
@@ -236,6 +251,25 @@ def repo_detail(request: Request, full_name: str,
       ORDER BY date
     """, (full_name,)).fetchall()
     spark = sparkline([r["stars"] for r in trend])
+    # 排名走势:历史重建榜 trusted 口径(full 全可信,partial 仅 Top10);
+    # 无可信历史记录时回退真实抓取榜(total)。
+    rank_rows = conn.execute("""
+      SELECT date, rank FROM trend_daily
+      WHERE full_name = ? AND list_type='arch:total'
+        AND (quality='full' OR (quality='partial' AND rank <= 10))
+      ORDER BY date
+    """, (full_name,)).fetchall()
+    if rank_rows:
+        rank_note = ("口径:历史重建榜(arch:total)trusted 记录;"
+                     "2026-02 ~ 2026-08 存在数据缺口。")
+    else:
+        rank_rows = conn.execute("""
+          SELECT date, rank FROM trend_daily
+          WHERE full_name = ? AND list_type='total'
+          ORDER BY date
+        """, (full_name,)).fetchall()
+        rank_note = "口径:真实抓取榜(total)每日名次(历史重建榜无可信记录)。"
+    rank_svg = rank_chart(rank_rows, full_name)
     topics = []
     try:
         topics = json.loads(repo["topics"] or "[]")
@@ -244,7 +278,7 @@ def repo_detail(request: Request, full_name: str,
     repo["homepage"] = safe_homepage(repo.get("homepage"))
     return templates.TemplateResponse(request, "repo.html", {
         "r": repo, "trend": trend, "all_count": len(all_trend), "spark": spark,
-        "topics": topics,
+        "rank_svg": rank_svg, "rank_note": rank_note, "topics": topics,
     })
 
 
@@ -409,6 +443,64 @@ def trends(request: Request, conn: sqlite3.Connection = Depends(get_db)):
     })
 
 
+# ---------- JSON API(只读;错误用 HTTPException,连接复用 get_db) ----------
+
+@app.get("/api/search")
+def api_search(conn: sqlite3.Connection = Depends(get_db),
+               q: str = Query("", max_length=200),
+               lang: str = "", has_profile: str = "",
+               page: int = Query(1, ge=1), per_page: int = Query(30, ge=1, le=100)):
+    """检索 JSON 版:输入回显 + 真实总数分页 + 行数据(fts 模式含 bm25 score)。"""
+    res = search_repos(conn, q, lang=lang, has_profile=has_profile,
+                       page=page, per_page=per_page)
+    return JSONResponse({
+        "query": {"q": q, "lang": lang, "has_profile": bool(has_profile),
+                  "page": page, "per_page": per_page,
+                  "mode": res["mode"], "sort_label": res["sort_label"]},
+        "total": res["total"], "page": res["page"], "pages": res["pages"],
+        "per_page": res["per_page"], "rows": [dict(r) for r in res["rows"]],
+    })
+
+
+@app.get("/api/repo/{full_name:path}")
+def api_repo(full_name: str, conn: sqlite3.Connection = Depends(get_db)):
+    """仓库详情 JSON:repos 行 + 画像五字段(homepage 已安全过滤)+ 全部趋势行。"""
+    row = conn.execute("""
+      SELECT r.*, p.one_liner, p.purpose, p.boundaries, p.tech_highlights, p.maturity
+      FROM repos r LEFT JOIN profiles p ON p.full_name = r.full_name
+      WHERE r.full_name = ?
+    """, (full_name,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"未知仓库: {full_name}")
+    repo = dict(row)
+    repo["homepage"] = safe_homepage(repo.get("homepage"))
+    trend = conn.execute("""
+      SELECT date, rank, stars, list_type, quality FROM trend_daily
+      WHERE full_name = ? ORDER BY date, list_type
+    """, (full_name,)).fetchall()
+    return JSONResponse({"repo": repo, "trend": [dict(t) for t in trend]})
+
+
+@app.get("/api/day/{day}")
+def api_day(day: str, list_type: str = "",
+            conn: sqlite3.Connection = Depends(get_db)):
+    """某日榜单 JSON:list_type 缺省时优先 total,其次 arch:total;均无数据 404。"""
+    sql = ("SELECT rank, full_name, stars, quality FROM trend_daily "
+           "WHERE date=? AND list_type=? ORDER BY rank")
+    if list_type:
+        rows = conn.execute(sql, (day, list_type)).fetchall()
+        if not rows:
+            raise HTTPException(status_code=404,
+                                detail=f"该日期无此榜单数据: {day} {list_type}")
+        return JSONResponse([dict(r) for r in rows])
+    rows = conn.execute(sql, (day, "total")).fetchall()
+    if not rows:
+        rows = conn.execute(sql, (day, "arch:total")).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"该日期无榜单数据: {day}")
+    return JSONResponse([dict(r) for r in rows])
+
+
 @app.get("/healthz")
 def healthz():
     return JSONResponse({"status": "ok"})
@@ -442,6 +534,38 @@ def sparkline(points: list, w: int = 640, h: int = 90) -> str:
             f'aria-label="历史单日星标曲线">'
             f'<path d="{area}" fill="rgba(78,121,169,.15)"/>'
             f'<polyline points="{coords}" fill="none" stroke="#4e79a7" stroke-width="2"/></svg>')
+
+
+def rank_chart(points: list, full_name: str = "", w: int = 640, h: int = 180) -> str:
+    """历史排名折线:x 轴按序号均匀分布(同 sparkline);y 轴反转(rank 1 在最上),
+    范围按数据最大 rank 归一(封顶 50)。动态文本(aria-label 等)全部 html 转义。"""
+    if not points:
+        return ""
+    ranks = [min(int(p["rank"]), 50) for p in points]
+    cap = max(max(ranks), 1)          # y 轴底端对应的名次(已封顶 50)
+    top, bottom = 14, h - 8           # 上下留白,容纳刻度文字
+    denom = max(cap - 1, 1)
+    step = w / max(len(points) - 1, 1)
+
+    def y_of(rank: int) -> float:
+        return top + (rank - 1) / denom * (bottom - top)
+
+    coords = " ".join(f"{i * step:.1f},{y_of(r):.1f}" for i, r in enumerate(ranks))
+    out = [f'<svg viewBox="0 0 {w} {h}" class="rankchart" role="img" '
+           f'aria-label="{html.escape(str(full_name))} 历史排名走势">']
+    for tick in (1, 10, 25, 50):      # 可选刻度:仅画不超过上限的名次参考线
+        if tick > cap:
+            continue
+        y = y_of(tick)
+        out.append(f'<line x1="0" y1="{y:.1f}" x2="{w}" y2="{y:.1f}" '
+                   f'stroke="#d8dee4" stroke-width="1"/>')
+        out.append(f'<text x="4" y="{y - 3:.1f}" class="axis">#{tick}</text>')
+    out.append(f'<polyline points="{coords}" fill="none" '
+               f'stroke="#4e79a7" stroke-width="2"/>')
+    if len(ranks) == 1:               # 单点画不出折线,补一个标记
+        out.append(f'<circle cx="0" cy="{y_of(ranks[0]):.1f}" r="3" fill="#4e79a7"/>')
+    out.append("</svg>")
+    return "".join(out)
 
 
 def stacked_bars(quarters: list, series: dict, w: int = 900, h: int = 260) -> str:

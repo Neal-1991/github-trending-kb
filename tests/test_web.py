@@ -166,3 +166,158 @@ def test_missing_db_fails_clearly(sandbox, monkeypatch):
     r = c.get("/search", params={"q": "x"})
     assert r.status_code == 500  # 未静默创建空库并 200;明确失败
     assert not sandbox["db"].exists()
+
+
+# ---------- 任务 D:仓库详情页排名走势 ----------
+
+def _add_rows(*trend_rows, repo_full_name=None):
+    """在沙箱库中补插仓库与趋势行(测试专用)。"""
+    from scripts.db import connect
+    conn = connect()
+    if repo_full_name:
+        conn.execute("INSERT OR REPLACE INTO repos (full_name, verified, source)"
+                     " VALUES (?, 1, 'api')", (repo_full_name,))
+    conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)",
+                     trend_rows)
+    conn.commit()
+    conn.close()
+
+
+def test_repo_detail_rank_chart_present(client):
+    r = client.get("/repo/owner0/repo0")
+    assert r.status_code == 200
+    assert "<svg" in r.text
+    assert "owner0/repo0 历史排名走势" in r.text  # 排名曲线 aria-label
+
+
+def test_repo_detail_rank_chart_partial_top10_only(client):
+    # partial 仅 Top10 可信:rank 9 计入,rank 33 不计入(否则会画出 #25 刻度)
+    _add_rows(*[("2022-05-01", "arch:total", 9, "part/ial", 50, "partial"),
+                ("2022-05-02", "arch:total", 33, "part/ial", 50, "partial")],
+              repo_full_name="part/ial")
+    r = client.get("/repo/part/ial")
+    assert r.status_code == 200
+    assert "part/ial 历史排名走势" in r.text
+    assert "#25" not in r.text
+
+
+def test_repo_detail_rank_chart_fallback_to_real_total(client):
+    # 历史重建榜无可信记录时回退真实抓取榜(total)
+    _add_rows(("2026-09-01", "total", 7, "real/only", 12, None),
+              repo_full_name="real/only")
+    r = client.get("/repo/real/only")
+    assert r.status_code == 200
+    assert "real/only 历史排名走势" in r.text
+    assert "真实抓取榜" in r.text  # 回退口径说明
+
+
+def test_repo_detail_degraded_only_no_chart(client):
+    # 仅 degraded 记录不参与 trusted 口径,且无真实榜可回退 → 无排名曲线
+    r = client.get("/repo/degraded/only")
+    assert r.status_code == 200
+    assert "历史排名走势" not in r.text
+    assert "暂无排名数据" in r.text
+
+
+def test_repo_detail_without_trend_data_still_ok(client):
+    # 完全没有任何趋势记录的仓库,详情页仍 200
+    _add_rows(repo_full_name="lonely/none")
+    r = client.get("/repo/lonely/none")
+    assert r.status_code == 200
+    assert "历史排名走势" not in r.text
+
+
+# ---------- 任务 E:JSON API ----------
+
+def test_api_search_basic_and_echo(client):
+    r = client.get("/api/search", params={"q": "desc"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 12
+    assert data["page"] == 1 and data["pages"] == 1 and data["per_page"] == 30
+    assert len(data["rows"]) == 12
+    for key in ("full_name", "description", "language", "stars", "core_days",
+                "first_trend_date", "verified", "one_liner", "score"):
+        assert key in data["rows"][0]  # fts 模式含 bm25 score
+    assert data["query"]["q"] == "desc"
+    assert data["query"]["mode"] == "fts"
+
+
+def test_api_search_pagination(client):
+    data = client.get("/api/search",
+                      params={"q": "desc", "per_page": 5, "page": 3}).json()
+    assert data["total"] == 12
+    assert data["pages"] == 3
+    assert len(data["rows"]) == 2  # 末页剩余 2 条
+
+
+def test_api_search_has_profile_filter(client):
+    data = client.get("/api/search", params={"has_profile": "1"}).json()
+    assert data["total"] == 1
+    assert data["rows"][0]["full_name"] == "owner0/repo0"
+    assert data["rows"][0]["one_liner"] == "项目0简介"
+    assert data["query"]["has_profile"] is True
+
+
+def test_api_search_control_char_422(client):
+    # 控制字符 422 与 HTML 版同口径
+    r = client.get("/api/search", params={"q": "ab\x01cd"})
+    assert r.status_code == 422
+
+
+def test_api_repo_known(client):
+    r = client.get("/api/repo/owner0/repo0")
+    assert r.status_code == 200
+    data = r.json()
+    repo = data["repo"]
+    assert repo["full_name"] == "owner0/repo0"
+    assert repo["one_liner"] == "项目0简介"
+    for key in ("purpose", "boundaries", "tech_highlights", "maturity"):
+        assert key in repo  # 画像五字段
+    arch = [t for t in data["trend"] if t["list_type"] == "arch:total"]
+    real = [t for t in data["trend"] if t["list_type"] == "total"]
+    assert arch and real
+    assert set(arch[0]) >= {"date", "rank", "stars", "list_type", "quality"}
+    assert arch[0]["quality"] == "full"
+    assert real[0]["quality"] is None  # 真实抓取榜 quality 为 NULL
+
+
+def test_api_repo_homepage_sanitized(client):
+    data = client.get("/api/repo/evil/xss").json()
+    assert data["repo"]["homepage"] is None  # javascript: 被丢弃
+
+
+def test_api_repo_404(client):
+    r = client.get("/api/repo/no/such")
+    assert r.status_code == 404
+    assert "detail" in r.json()
+
+
+def test_api_day_prefers_total(client):
+    rows = client.get("/api/day/2026-09-01").json()
+    assert len(rows) == 10
+    assert set(rows[0]) == {"rank", "full_name", "stars", "quality"}
+    assert rows[0]["rank"] == 1
+    assert rows[0]["full_name"] == "owner0/repo0"
+    assert rows[0]["stars"] == 30  # stars_today
+
+
+def test_api_day_total_priority_over_arch(client):
+    # 同日两类榜单都有 → 默认解析优先 total
+    _add_rows(("2022-03-02", "total", 1, "evil/xss", 77, None))
+    rows = client.get("/api/day/2022-03-02").json()
+    assert rows[0]["full_name"] == "evil/xss"
+    assert rows[0]["stars"] == 77
+
+
+def test_api_day_falls_back_to_arch(client):
+    rows = client.get("/api/day/2022-03-02").json()
+    assert len(rows) == 12
+    assert rows[0]["full_name"] == "owner0/repo0"
+    assert rows[0]["quality"] == "full"
+
+
+def test_api_day_both_missing_404(client):
+    r = client.get("/api/day/1999-01-01")
+    assert r.status_code == 404
+    assert "detail" in r.json()

@@ -52,4 +52,12 @@
 {% endif %}
 </div>
 <p class="muted">Top50 全量观测 {{ all_count }} 天</p>
+
+<h2>排名走势</h2>
+{% if rank_svg %}
+{{ rank_svg|safe }}
+<p class="muted">{{ rank_note }}</p>
+{% else %}
+<p class="muted">暂无排名数据</p>
+{% endif %}
 {% endblock %}

@@ -53,7 +53,7 @@ tr:last-child td { border-bottom: none; }
 .muted-note { background: #eef1f4; border-color: var(--line); color: var(--muted); }
 .one-liner { font-size: 16px; font-weight: 600; }
 .profile section { margin-bottom: 12px; }
-.spark, .stacked { width: 100%; height: auto; margin: 12px 0; }
+.spark, .stacked, .rankchart { width: 100%; height: auto; margin: 12px 0; }
 .axis { font-size: 11px; fill: var(--muted); }
 .legend { margin: 6px 0 12px; }
 .legend-item { margin-right: 14px; font-size: 12px; color: var(--fg); }

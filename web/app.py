@@ -249,12 +249,21 @@ def repo_detail(request: Request, full_name: str,
 
 @app.get("/browse", response_class=HTMLResponse)
 def browse(request: Request, conn: sqlite3.Connection = Depends(get_db),
-           d: str = "", list_type: str = "arch:total", month: str = ""):
+           d: str = "", list_type: str = "", month: str = ""):
     lists = conn.execute(
         "SELECT DISTINCT list_type FROM trend_daily ORDER BY list_type").fetchall()
     valid_types = {r["list_type"] for r in lists}
     fallback_note = False
-    if list_type not in valid_types:
+    if not list_type:
+        # 默认视图:全局最新日期所在的榜单(真实抓取日优先于历史重建档,
+        # 否则 arch:total 只到 ARCH_END,会让人误以为数据停在 1 月)
+        row = conn.execute("""
+          SELECT list_type FROM trend_daily
+          WHERE date = (SELECT MAX(date) FROM trend_daily)
+          ORDER BY CASE WHEN list_type='total' THEN 0 ELSE 1 END, list_type
+          LIMIT 1""").fetchone()
+        list_type = row["list_type"] if row else "arch:total"
+    elif list_type not in valid_types:
         list_type = "arch:total" if "arch:total" in valid_types else (
             sorted(valid_types)[0] if valid_types else list_type)
         fallback_note = True
@@ -267,7 +276,8 @@ def browse(request: Request, conn: sqlite3.Connection = Depends(get_db),
     max_date = conn.execute(
         "SELECT MAX(date) m FROM trend_daily WHERE list_type=?", (list_type,)).fetchone()["m"]
     if not d or not date_exists(d):
-        d, fallback_note = (max_date or d), True
+        fallback_note = fallback_note or bool(d)  # 默认定位最新日不算回退,显式无效日期才提示
+        d = max_date or d
 
     months = conn.execute("""
       SELECT DISTINCT substr(date,1,7) m FROM trend_daily WHERE list_type=?

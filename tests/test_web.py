@@ -84,6 +84,22 @@ def test_browse_month_navigation(client):
     assert r.status_code == 200
 
 
+def test_browse_defaults_to_globally_latest_day(client):
+    """默认视图应落在全局最新日期(真实抓取日),而不是 arch:total 的历史末日。"""
+    r = client.get("/browse")
+    assert r.status_code == 200
+    assert "2026-09-01" in r.text
+    # 默认定位不是回退,不显示回退提示
+    assert "已回退" not in r.text
+
+
+def test_browse_explicit_arch_total_still_reaches_history(client):
+    # 夹具中 arch:total 的最新日是 2022-04-01(degraded 样本日)
+    r = client.get("/browse", params={"list_type": "arch:total"})
+    assert r.status_code == 200
+    assert "2022-04-01" in r.text
+
+
 def test_xss_language_escaped(client):
     r = client.get("/trends")
     assert r.status_code == 200

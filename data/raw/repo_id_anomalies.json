@@ -1,0 +1,12 @@
+{
+  "rename_candidates": [],
+  "reuse_candidates": [],
+  "source": "repo_meta_api.jsonl",
+  "stats": {
+    "observations": 2751,
+    "rename_candidates": 0,
+    "reuse_candidates": 0,
+    "unique_names": 2745,
+    "unique_repo_ids": 43
+  }
+}

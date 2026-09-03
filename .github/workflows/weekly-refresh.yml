@@ -31,6 +31,12 @@ jobs:
       - name: Rebuild DB from snapshots
         run: python scripts/build_db.py
 
+      # 每周尝试补齐上游恢复的历史日期;上游未恢复时 fail closed 无副作用,
+      # 网络抖动等失败不应阻断元数据刷新,故 continue-on-error
+      - name: Try backfilling recovered history dates
+        continue-on-error: true
+        run: python scripts/backfill_gap.py --from 2026-03-01
+
       - name: Refresh stale repo metadata
         env:
           # 优先用 PAT(额度更高),否则回退 Actions 内置 token
@@ -42,6 +48,8 @@ jobs:
           git config user.name "trending-kb-bot"
           git config user.email "bot@users.noreply.github.com"
           git add data/raw/repo_meta_api.jsonl data/raw/repo_gone.jsonl
+          # 补洞成功时同步提交重建榜 CSV(未变化时 add 为无操作)
+          [ -f data/raw/trends_gharchive.csv ] && git add data/raw/trends_gharchive.csv
           if git diff --cached --quiet; then
             echo "no changes"
           else

@@ -101,9 +101,9 @@ def test_trusted_metrics_exclude_partial_gt10(sandbox):
     """partial 且 rank>10 不进入 best_rank/trend_days 的 trusted 口径(T15)。"""
     write_source_files(sandbox, repos=3)
     conn = rebuild()
-    # partial 月份的 rank 30 观测
-    conn.execute("INSERT OR REPLACE INTO trend_daily VALUES ('2025-12-01','arch:total',30,'owner0/repo0',5,'partial')")
-    conn.execute("INSERT OR REPLACE INTO trend_daily VALUES ('2025-12-02','arch:total',3,'owner0/repo0',50,'partial')")
+    # partial 月份的 rank 30 观测(第 7 列 star_anomaly=0,与 7 列 schema 对齐)
+    conn.execute("INSERT OR REPLACE INTO trend_daily VALUES ('2025-12-01','arch:total',30,'owner0/repo0',5,'partial',0)")
+    conn.execute("INSERT OR REPLACE INTO trend_daily VALUES ('2025-12-02','arch:total',3,'owner0/repo0',50,'partial',0)")
     conn.commit()
     from scripts.db import refresh_repo_stats
     refresh_repo_stats(conn)
@@ -120,7 +120,7 @@ def test_core_days_excludes_degraded_observations(sandbox):
     ).fetchone()["core_days"]
     conn.execute(
         "INSERT OR REPLACE INTO trend_daily VALUES "
-        "('2025-01-01','arch:total',1,'owner0/repo0',500,'degraded')")
+        "('2025-01-01','arch:total',1,'owner0/repo0',500,'degraded',0)")
     conn.commit()
     from scripts.db import refresh_repo_stats
     refresh_repo_stats(conn)
@@ -134,7 +134,9 @@ def test_core_days_excludes_degraded_observations(sandbox):
 def test_anomaly_excluded_from_best_daily_stars(sandbox):
     write_source_files(sandbox, repos=3)
     conn = rebuild()
-    conn.execute("INSERT OR REPLACE INTO trend_daily VALUES ('2024-09-29','arch:total',1,'owner0/repo0',27891,'full')")
+    # 第 7 列 star_anomaly=1:该行被标记疑似刷星(原规则下单日 27891 已超阈值),
+    # 不参与 best_daily_stars;若人工 include 纠正为 0 则恢复参与(见 test_data_quality)
+    conn.execute("INSERT OR REPLACE INTO trend_daily VALUES ('2024-09-29','arch:total',1,'owner0/repo0',27891,'full',1)")
     conn.commit()
     assert conn.execute(
         "SELECT best_daily_stars FROM repos WHERE full_name='owner0/repo0'"

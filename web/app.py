@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import ARCH_DAILY_STAR_ANOMALY, ROOT
+from config import ROOT
 from scripts.db import connect_ro
 
 app = FastAPI(title="GitHub 趋势榜知识库", docs_url=None, redoc_url=None, openapi_url=None)
@@ -491,13 +491,14 @@ def trends(request: Request, conn: sqlite3.Connection = Depends(get_db)):
       SELECT full_name, core_days, trend_days, best_rank, first_trend_date, language
       FROM repos WHERE core_days >= 10 ORDER BY core_days DESC LIMIT 15
     """).fetchall()
-    # 疑似刷星(单日星标 >= ARCH_DAILY_STAR_ANOMALY)默认不作为爆发事件展示
+    # 疑似刷星行(trend_daily.star_anomaly=1:阈值判定或人工 exclude)默认不作为
+    # 爆发事件展示;人工 include 纠正的真实爆发(flag=0)正常参与排序。
     spikes = conn.execute("""
       SELECT date, full_name, stars FROM trend_daily
       WHERE list_type='arch:total' AND rank<=10 AND quality='full'
-        AND stars < ?
+        AND star_anomaly = 0
       ORDER BY stars DESC LIMIT 12
-    """, (ARCH_DAILY_STAR_ANOMALY,)).fetchall()
+    """).fetchall()
     quality = conn.execute("""
       SELECT substr(date,1,7) m, quality, count(DISTINCT date) days FROM trend_daily
       WHERE list_type='arch:total' GROUP BY m, quality ORDER BY m

@@ -1,0 +1,20 @@
+# 刷星判定人工覆盖(source of truth,随 rebuild 生效;进 git)。
+#
+# 背景:历史重建榜(arch:total)单日星标 >= ARCH_DAILY_STAR_ANOMALY(config.py,现为 15000)
+# 会被自动标记为疑似刷星(trend_daily.star_anomaly=1),不参与 best_daily_stars
+# 与 Web"现象级爆发"展示。阈值规则可能误杀真实爆发,或漏标新型刷星,
+# 因此提供本文件供人工纠正:
+#
+#   include <YYYY-MM-DD> <full_name>   强制视为真实爆发(star_anomaly=0,覆盖阈值判定)
+#   exclude <YYYY-MM-DD> <full_name>   强制视为疑似刷星(star_anomaly=1)
+#
+# 规则:
+# - 日期为该仓库上榜日(arch:total 榜,date 列);full_name 为 owner/repo;
+# - 仅对 arch:total 行生效,真实抓取榜(total/lang:*)不受影响;
+# - `#` 开头的行为注释,空行忽略;同一 (日期, 仓库) 多行时后一行生效;
+# - 未知指令或格式错误会导致 rebuild 直接失败(fail closed),请修正后再重建;
+# - 文件不存在视为无覆盖,重建照常。
+#
+# 示例(去掉行首 # 即生效):
+# include 2023-11-07 owner/repo
+# exclude 2024-09-29 owner/repo

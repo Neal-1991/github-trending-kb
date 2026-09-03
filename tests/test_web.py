@@ -16,13 +16,13 @@ def client(sandbox):
     conn = rebuild()
     conn.execute("INSERT OR REPLACE INTO repos (full_name, language, homepage, verified, source)"
                  " VALUES ('evil/xss', '<script>alert(1)</script>', 'javascript:alert(1)', 1, 'api')")
-    # 给恶意仓库一条 Top10 趋势记录,使其进入趋势页聚合
+    # 给恶意仓库一条 Top10 趋势记录,使其进入趋势页聚合(第 7 列 star_anomaly=0)
     conn.execute("INSERT OR REPLACE INTO trend_daily VALUES "
-                 "('2022-03-01','arch:total',1,'evil/xss',500,'full')")
+                 "('2022-03-01','arch:total',1,'evil/xss',500,'full',0)")
     conn.execute("INSERT OR REPLACE INTO repos (full_name, language, verified, source)"
                  " VALUES ('degraded/only', 'DegradedOnly', 1, 'api')")
     conn.execute("INSERT OR REPLACE INTO trend_daily VALUES "
-                 "('2022-04-01','arch:total',1,'degraded/only',500,'degraded')")
+                 "('2022-04-01','arch:total',1,'degraded/only',500,'degraded',0)")
     conn.commit()
     conn.close()
     import web.app as webapp
@@ -173,14 +173,14 @@ def test_missing_db_fails_clearly(sandbox, monkeypatch):
 # ---------- 任务 D:仓库详情页排名走势 ----------
 
 def _add_rows(*trend_rows, repo_full_name=None):
-    """在沙箱库中补插仓库与趋势行(测试专用)。"""
+    """在沙箱库中补插仓库与趋势行(测试专用);6 元组补第 7 列 star_anomaly=0。"""
     from scripts.db import connect
     conn = connect()
     if repo_full_name:
         conn.execute("INSERT OR REPLACE INTO repos (full_name, verified, source)"
                      " VALUES (?, 1, 'api')", (repo_full_name,))
-    conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)",
-                     trend_rows)
+    conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?,?)",
+                     [row + (0,) for row in trend_rows])
     conn.commit()
     conn.close()
 

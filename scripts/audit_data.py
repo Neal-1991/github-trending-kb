@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DAILY_DIR, DB_PATH, PROFILE_DIR, RAW_DIR, README_DIR
+from scripts.db import latest_api_meta_by_full_name, parse_star_anomaly_overrides
 from scripts.snapshot_store import SnapshotValidationError, iter_snapshots
 
 CONFLICT_FIELDS = ["description", "language", "stargazers_count", "created_at",
@@ -65,8 +66,76 @@ def audit_snapshot_csv(errors: list, findings: list) -> dict:
     if dups:
         findings.append(f"repo_meta_snapshot.csv: {len(dups)} 个仓库重复"
                         f"(多 {len(rows) - len(by_name)} 行),其中 {len(conflicts)} 个字段冲突;"
-                        f"导入为 first-wins,应按 fetched_at 确定性合并")
+                        f"CSV 无 fetched_at,first-wins 仅为该文件内部的历史行为;"
+                        f"repo_meta_api.jsonl 已按 fetched_at 确定性合并,最新观测覆盖快照")
     return {"rows": len(rows), "unique": len(by_name), "dups": len(dups), "conflicts": len(conflicts)}
+
+
+def audit_api_meta_merge() -> dict:
+    """repo_meta_api.jsonl 确定性合并(db.latest_api_meta_by_full_name)前后的行数。
+
+    与 db.py 导入同口径:同一 full_name 多行观测合并为一行,fetched_at 最新者胜。
+    """
+    path = RAW_DIR / "repo_meta_api.jsonl"
+    if not path.exists():
+        return {}
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        records.append(json.loads(line))
+    merged = latest_api_meta_by_full_name(records)
+    return {"rows_before": len(records), "rows_after": len(merged),
+            "merged_away": len(records) - len(merged)}
+
+
+def audit_star_anomaly_overrides(errors: list) -> dict:
+    """人工覆盖文件有效行计数;解析失败记入硬错误(重建同样会 fail closed)。"""
+    path = RAW_DIR / "star_anomaly_overrides.txt"
+    if not path.exists():
+        return {}
+    try:
+        rules = parse_star_anomaly_overrides(path.read_text(encoding="utf-8"))
+    except ValueError as e:
+        errors.append(f"star_anomaly_overrides.txt 解析失败(重建将 fail closed): {e}")
+        return {}
+    return {"lines": len(rules),
+            "includes": sum(1 for v in rules.values() if v == 0),
+            "excludes": sum(1 for v in rules.values() if v == 1)}
+
+
+def audit_repo_id_map(errors: list, findings: list) -> dict:
+    """identity v2 身份地图覆盖率与异常计数;地图由 scripts/repo_id_map.py 重建。"""
+    map_path = RAW_DIR / "repo_id_map.jsonl"
+    out = {"names": 0, "with_repo_id": 0, "rename_candidates": 0, "reuse_candidates": 0}
+    if not map_path.exists():
+        return out
+    try:
+        for line in map_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            out["names"] += 1
+            if row.get("repo_id") is not None:
+                out["with_repo_id"] += 1
+    except (json.JSONDecodeError, OSError) as exc:
+        errors.append(f"repo_id_map.jsonl 读取失败(重建: python scripts/repo_id_map.py): {exc}")
+        return out
+    anomalies_path = RAW_DIR / "repo_id_anomalies.json"
+    if anomalies_path.exists():
+        try:
+            anomalies = json.loads(anomalies_path.read_text(encoding="utf-8"))
+            out["rename_candidates"] = len(anomalies.get("rename_candidates") or [])
+            out["reuse_candidates"] = len(anomalies.get("reuse_candidates") or [])
+        except json.JSONDecodeError as exc:
+            errors.append(f"repo_id_anomalies.json 解析失败: {exc}")
+            return out
+    if out["rename_candidates"] or out["reuse_candidates"]:
+        findings.append(
+            f"身份地图检出 {out['rename_candidates']} 条改名候选 / "
+            f"{out['reuse_candidates']} 条同名复用候选(详见 repo_id_anomalies.json,"
+            f"可作为 identity v2 合并依据)")
+    return out
 
 
 def audit_canonical_snapshots(errors: list, findings: list) -> dict:
@@ -153,6 +222,20 @@ def audit_db(errors: list, findings: list) -> dict:
         findings.append(f"raw 中保留 {out['partial_rank_gt10']} 条 partial 且 rank>10 的记录;"
                         f"trusted 聚合会排除这些记录(partial 口径仅 Top10 可信)")
 
+    # 疑似刷星标记行数(阈值判定或人工 exclude);旧 schema(未重建)缺列时提示
+    has_flag_col = "star_anomaly" in {
+        r["name"] for r in conn.execute("PRAGMA table_info(trend_daily)")}
+    if has_flag_col:
+        out["star_anomaly_rows"] = conn.execute(
+            "SELECT count(*) c FROM trend_daily WHERE star_anomaly=1").fetchone()["c"]
+        if out["star_anomaly_rows"]:
+            findings.append(f"{out['star_anomaly_rows']} 条 trend_daily 记录被标记疑似刷星"
+                            f"(star_anomaly=1,阈值判定或人工 exclude),"
+                            f"不参与 best_daily_stars 与\"现象级爆发\"展示(raw 保留);"
+                            f"如属真实爆发,请在 star_anomaly_overrides.txt 中 include 纠正")
+    else:
+        findings.append("trend_daily 缺少 star_anomaly 列(旧 schema 派生库,待重建后统计)")
+
     # profile 状态:README 缺失清单未落到 profile_status
     no_readme = conn.execute(
         "SELECT count(*) c FROM repos WHERE profile_status='no_readme'").fetchone()["c"]
@@ -232,6 +315,9 @@ def main():
               PROFILE_DIR / "profiles.jsonl"]:
         counts[p.name] = audit_jsonl(p, errors, findings)
     counts["repo_meta_snapshot.csv"] = audit_snapshot_csv(errors, findings)
+    counts["repo_meta_api_merge"] = audit_api_meta_merge()
+    counts["star_anomaly_overrides"] = audit_star_anomaly_overrides(errors)
+    counts["repo_id_map"] = audit_repo_id_map(errors, findings)
     counts["canonical_snapshots"] = audit_canonical_snapshots(errors, findings)
     counts["daily_archive"] = audit_daily_archive()
     db_info = audit_db(errors, findings)

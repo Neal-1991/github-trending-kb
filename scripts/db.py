@@ -9,15 +9,24 @@ os.replace 正式库;任何一步失败,正式库保持不变。聚合口径为 
 - quality='partial' 仅 rank<=10 可信(数据源口径);
 - quality='degraded' 仅保留原始记录,不参与聚合;
 - 真实榜(total/lang:*,quality 为空)全部可信;
-- 历史重建榜中单日星标 >= ARCH_DAILY_STAR_ANOMALY 的记录视为疑似刷星,
-  不参与 best_daily_stars 与"现象级爆发"展示(raw 记录保留)。
+- 疑似刷星以 trend_daily.star_anomaly 标记(arch:total 单日星标 >= ARCH_DAILY_STAR_ANOMALY
+  由阈值判定),并可被 data/raw/star_anomaly_overrides.txt 人工纠正
+  (include=真实爆发置 0 / exclude=疑似刷星置 1);flag=1 的行不参与
+  best_daily_stars 与"现象级爆发"展示(raw 记录保留)。
+
+元数据合并:repo_meta_api.jsonl 同一仓库存在多行历史观测,导入前按 full_name
+分组只保留 fetched_at 最新一行(确定性,与文件行序解耦,见
+latest_api_meta_by_full_name);repo_meta_snapshot.csv 无 fetched_at,保持内部
+first-wins(重复与冲突由 audit_data.py 报告)。
 """
 import csv
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -60,6 +69,9 @@ CREATE TABLE trend_daily (
   full_name TEXT NOT NULL,
   stars INTEGER,              -- 当日新增星标(arch)或 stars_today(实时榜)
   quality TEXT,               -- arch 专用: full / partial / degraded
+  star_anomaly INTEGER NOT NULL DEFAULT 0,
+                              -- 1=疑似刷星(arch:total 阈值判定或人工 exclude);
+                              -- 0=可信(含人工 include 纠正的真实爆发)
   PRIMARY KEY (date, list_type, rank)
 );
 CREATE INDEX idx_trend_repo ON trend_daily(full_name);
@@ -94,8 +106,9 @@ CREATE TABLE push_log (
 _TRUSTED_WHERE = """
   (quality IS NULL OR quality = 'full' OR (quality = 'partial' AND rank <= 10))
 """
-# 疑似刷星:历史重建榜单日星标异常高(raw 保留,但不作为可信峰值展示)
-_ANOMALY_WHERE = " NOT (list_type = 'arch:total' AND stars >= %d)" % ARCH_DAILY_STAR_ANOMALY
+# 疑似刷星行不作为可信峰值展示;具体行由 trend_daily.star_anomaly 标记
+# (导入时阈值判定,overrides 人工 include/exclude 纠正,见 2d)
+_ANOMALY_WHERE = " star_anomaly = 0"
 
 
 def connect(db_path=None) -> sqlite3.Connection:
@@ -183,6 +196,83 @@ def _push_log_rows(path: Path) -> list[tuple]:
     return rows
 
 
+def latest_api_meta_by_full_name(records: list[dict]) -> list[dict]:
+    """repo_meta_api.jsonl 确定性合并:按 full_name 分组,只保留 fetched_at 最新的一行。
+
+    规则(排序完全由数据决定,与文件行序解耦):
+    - fetched_at 缺失视为最旧(参与比较时取空串下界);
+    - fetched_at 相同(或同时缺失)时保留文件顺序靠后的一行,与历史"后者覆盖"语义一致;
+    - 返回按 full_name 排序的列表,同一 full_name 只出现一次。
+    """
+    best: dict[str, tuple[str, int, dict]] = {}
+    for idx, m in enumerate(records):
+        key = m["full_name"]
+        rank = (m.get("fetched_at") or "", idx)
+        cur = best.get(key)
+        if cur is None or rank > (cur[0], cur[1]):
+            best[key] = (rank[0], rank[1], m)
+    return [best[k][2] for k in sorted(best)]
+
+
+def star_anomaly_flag(list_type: str, stars) -> int:
+    """阈值判定:arch:total 单日星标 >= ARCH_DAILY_STAR_ANOMALY 视为疑似刷星。
+
+    其余榜单(真实抓取/语言榜)不适用该规则,恒为 0。人工纠正见
+    parse_star_anomaly_overrides / apply_star_anomaly_overrides。
+    """
+    if list_type == "arch:total" and stars is not None and stars >= ARCH_DAILY_STAR_ANOMALY:
+        return 1
+    return 0
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_star_anomaly_overrides(text: str) -> dict[tuple[str, str], int]:
+    """解析人工覆盖文件 data/raw/star_anomaly_overrides.txt(纯函数)。
+
+    语法:`include <YYYY-MM-DD> <full_name>` 或 `exclude <YYYY-MM-DD> <full_name>`,
+    `#` 开头的注释行与空行忽略。include=强制视为真实爆发(flag 0,覆盖阈值判定),
+    exclude=强制视为疑似刷星(flag 1)。同一 (date, full_name) 多行时后行覆盖前行。
+    未知指令或格式错误抛 ValueError:覆盖文件不可解析时宁可重建失败(fail closed),
+    也不静默产出可疑的派生库。
+    """
+    rules: dict[tuple[str, str], int] = {}
+    for lineno, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        parts = s.split()
+        if len(parts) != 3 or parts[0] not in ("include", "exclude") \
+                or not _DATE_RE.match(parts[1]):
+            raise ValueError(f"star_anomaly_overrides.txt 第 {lineno} 行格式错误: {s!r}"
+                             f"(语法: include|exclude <YYYY-MM-DD> <full_name>)")
+        try:
+            date.fromisoformat(parts[1])
+        except ValueError as e:
+            raise ValueError(
+                f"star_anomaly_overrides.txt 第 {lineno} 行日期无效: {parts[1]!r}") from e
+        rules[(parts[1], parts[2])] = 0 if parts[0] == "include" else 1
+    return rules
+
+
+def apply_star_anomaly_overrides(conn: sqlite3.Connection) -> int:
+    """趋势全部导入后统一应用人工覆盖(仅 arch:total 行);返回实际生效的行数。"""
+    path = RAW_DIR / "star_anomaly_overrides.txt"
+    if not path.exists():
+        return 0
+    rules = parse_star_anomaly_overrides(path.read_text(encoding="utf-8"))
+    applied = 0
+    for (day, name), flag in sorted(rules.items()):
+        cur = conn.execute(
+            "UPDATE trend_daily SET star_anomaly=?"
+            " WHERE date=? AND full_name=? AND list_type='arch:total'",
+            (flag, day, name))
+        applied += max(cur.rowcount, 0)
+    conn.commit()
+    return applied
+
+
 def _import_sources(conn: sqlite3.Connection):
     """从 source 文件导入全部数据。每个阶段一个事务;异常向上抛,由 rebuild 清理临时库。"""
     # 1) 仓库元数据:repos 快照(INSERT OR IGNORE = first-wins,与历史行为一致;
@@ -208,22 +298,26 @@ def _import_sources(conn: sqlite3.Connection):
         conn.commit()
 
     # 1b) GitHub API 补全(覆盖快照;full_name 为 API 响应中的 canonical 名,
-    #     同时保存请求名与 repository id,为身份迁移做准备)
+    #     同时保存请求名与 repository id,为身份迁移做准备)。
+    #     同一仓库存在多行历史观测:先按 fetched_at 确定性合并(只保留最新一行,
+    #     与文件行序解耦)再入库,导入结果不再依赖 JSONL 内的行顺序。
     api_meta = RAW_DIR / "repo_meta_api.jsonl"
     if api_meta.exists():
         records = []
         for line in api_meta.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            m = json.loads(line)
-            records.append((
-                m["full_name"], m.get("description"), m.get("language"),
-                json.dumps(m.get("topics") or [], ensure_ascii=False), m.get("homepage"),
-                m.get("license"), m.get("default_branch"),
-                1 if m.get("fork") else 0, 1 if m.get("archived") else 0,
-                m.get("stars"), m.get("forks"), m.get("open_issues"),
-                m.get("created_at"), m.get("pushed_at"),
-            ))
+            records.append(json.loads(line))
+        records = latest_api_meta_by_full_name(records)
+        rows = [
+            (m["full_name"], m.get("description"), m.get("language"),
+             json.dumps(m.get("topics") or [], ensure_ascii=False), m.get("homepage"),
+             m.get("license"), m.get("default_branch"),
+             1 if m.get("fork") else 0, 1 if m.get("archived") else 0,
+             m.get("stars"), m.get("forks"), m.get("open_issues"),
+             m.get("created_at"), m.get("pushed_at"))
+            for m in records
+        ]
         conn.executemany(
             "INSERT INTO repos (full_name, description, language, topics, homepage,"
             " license, default_branch, fork, archived, stars, forks, open_issues,"
@@ -235,24 +329,29 @@ def _import_sources(conn: sqlite3.Connection):
             " archived=excluded.archived, stars=excluded.stars, forks=excluded.forks,"
             " open_issues=excluded.open_issues, created_at=excluded.created_at,"
             " pushed_at=excluded.pushed_at, verified=1, source='api'",
-            records,
+            rows,
         )
         conn.commit()
 
-    # 2) 趋势:GH Archive 重建榜(文件内已按日期+名次排序)
+    # 2) 趋势:GH Archive 重建榜(文件内已按日期+名次排序)。
+    #    star_anomaly 在导入时按阈值判定;人工覆盖在趋势全部导入后统一应用(见 2d)。
     arch = RAW_DIR / "trends_gharchive.csv"
     if arch.exists():
         by_date = defaultdict(list)
         with arch.open(encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
                 by_date[row["date"]].append(row)
+        arch_rows = []
+        for d, rs in sorted(by_date.items()):
+            for i, r in enumerate(rs):
+                stars = int(r["stars"])
+                arch_rows.append((d, "arch:total", i + 1, r["repo"], stars, r["quality"],
+                                  star_anomaly_flag("arch:total", stars)))
         conn.executemany(
-            "INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)",
-            (
-                (d, "arch:total", i + 1, r["repo"], int(r["stars"]), r["quality"])
-                for d, rs in sorted(by_date.items())
-                for i, r in enumerate(rs)
-            ),
+            "INSERT OR REPLACE INTO trend_daily"
+            " (date, list_type, rank, full_name, stars, quality, star_anomaly)"
+            " VALUES (?,?,?,?,?,?,?)",
+            arch_rows,
         )
         conn.commit()
 
@@ -265,10 +364,13 @@ def _import_sources(conn: sqlite3.Connection):
         for rec in snapshot_to_records(snapshot):
             for e in rec["entries"]:
                 snapshot_entries.append((date, rec["list_type"], e["rank"], e["repo"],
-                                         e.get("stars_today"), None))
+                                         e.get("stars_today"), None, 0))
     if snapshot_entries:
-        conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)",
-                         snapshot_entries)
+        conn.executemany(
+            "INSERT OR REPLACE INTO trend_daily"
+            " (date, list_type, rank, full_name, stars, quality, star_anomaly)"
+            " VALUES (?,?,?,?,?,?,?)",
+            snapshot_entries)
         conn.commit()
 
     # 兼容历史：同日已有 canonical 时整日跳过，避免部分/陈旧导出覆盖快照。
@@ -283,9 +385,17 @@ def _import_sources(conn: sqlite3.Connection):
                 continue
             for e in rec["entries"]:
                 entries.append((rec["date"], rec["list_type"], e["rank"], e["repo"],
-                                e.get("stars_today"), None))
-        conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)", entries)
+                                e.get("stars_today"), None, 0))
+        conn.executemany(
+            "INSERT OR REPLACE INTO trend_daily"
+            " (date, list_type, rank, full_name, stars, quality, star_anomaly)"
+            " VALUES (?,?,?,?,?,?,?)",
+            entries)
         conn.commit()
+
+    # 2d) 人工覆盖:include=强制真实(flag 0)/exclude=强制疑似刷星(flag 1),仅作用于
+    #     arch:total 行;文件缺失视为无覆盖,不可解析则抛错 → rebuild fail closed。
+    apply_star_anomaly_overrides(conn)
 
     # 2c) 趋势中出现但缺元数据的仓库补占位行,保证 repos ⊇ trend_daily 的仓库集合
     conn.execute("""

@@ -245,11 +245,16 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
     one_liners = profile_new_repos(new_names, dry_run, conn)
 
     if not dry_run:
-        # 当日榜单行增量入库(替代原第二次全量重建)
-        rows = [(date, rec["list_type"], e["rank"], e["repo"], e.get("stars_today"), None)
+        # 当日榜单行增量入库(替代原第二次全量重建)。
+        # 真实抓取榜(total/lang:*)不含 arch:total,star_anomaly 恒为 0
+        # (显式写 0,与 7 列 schema 对齐,阈值判定只发生在 arch CSV 导入路径)。
+        rows = [(date, rec["list_type"], e["rank"], e["repo"], e.get("stars_today"), None, 0)
                 for rec in records for e in rec["entries"]]
         if rows:
-            conn.executemany("INSERT OR REPLACE INTO trend_daily VALUES (?,?,?,?,?,?)", rows)
+            conn.executemany(
+                "INSERT OR REPLACE INTO trend_daily"
+                " (date, list_type, rank, full_name, stars, quality, star_anomaly)"
+                " VALUES (?,?,?,?,?,?,?)", rows)
             conn.commit()
         refresh_repo_stats(conn)
         reindex_fts(conn)

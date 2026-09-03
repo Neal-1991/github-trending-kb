@@ -97,6 +97,21 @@ def audit_canonical_snapshots(errors: list, findings: list) -> dict:
     }
 
 
+def audit_daily_archive() -> dict:
+    """月度归档统计(rotate_logs 的产物):archive 文件数与总行数。
+
+    只计数,不参与硬错误判定——归档文件由 rotate_logs 按"整行 JSON 文本"
+    去重写入,行可能来自 push_log 与 delivery_log 两种日志,混存属预期。
+    """
+    archive = DAILY_DIR / "archive"
+    files = sorted(archive.glob("*.jsonl")) if archive.exists() else []
+    return {
+        "files": len(files),
+        "rows": sum(1 for p in files
+                    for line in p.read_text(encoding="utf-8").splitlines() if line.strip()),
+    }
+
+
 def audit_db(errors: list, findings: list) -> dict:
     if not DB_PATH.exists():
         errors.append(f"数据库不存在: {DB_PATH}")
@@ -218,6 +233,7 @@ def main():
         counts[p.name] = audit_jsonl(p, errors, findings)
     counts["repo_meta_snapshot.csv"] = audit_snapshot_csv(errors, findings)
     counts["canonical_snapshots"] = audit_canonical_snapshots(errors, findings)
+    counts["daily_archive"] = audit_daily_archive()
     db_info = audit_db(errors, findings)
     mismatch = audit_daily_mismatch(findings)
 

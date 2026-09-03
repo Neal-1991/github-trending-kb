@@ -122,13 +122,18 @@ jobs:
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: python scripts/daily_job.py --notify-only --date ${{ needs.capture-and-persist.outputs.date }}
 
+      - name: Rotate delivery logs
+        run: python scripts/rotate_logs.py
+
       - name: Commit delivery log
         if: always()
         run: |
           git config user.name "trending-kb-bot"
           git config user.email "bot@users.noreply.github.com"
-          # delivery_log.jsonl 在通知首次成功写事件前可能不存在,容忍缺失
-          for f in data/daily/delivery_log.jsonl data/daily/push_log.jsonl; do
+          # delivery_log.jsonl 在通知首次成功写事件前可能不存在,容忍缺失;
+          # 轮转产生的归档也必须提交,否则下次 checkout 归档行会从 source 消失
+          for f in data/daily/delivery_log.jsonl data/daily/push_log.jsonl \
+                   data/daily/archive/*.jsonl; do
             [ -f "$f" ] && git add "$f"
           done
           if git diff --cached --quiet; then

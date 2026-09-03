@@ -170,6 +170,19 @@ def refresh_repo_stats(conn: sqlite3.Connection):
     conn.commit()
 
 
+def _push_log_rows(path: Path) -> list[tuple]:
+    """读取推送日志行(live 或月度归档);归档文件两种日志混存,仅取推送日志形状的行。"""
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if "list_type" not in r or "full_name" not in r:
+            continue  # 归档里的投递事件行,不属于 push_log 表
+        rows.append((r["date"], r["list_type"], r["full_name"], r.get("pushed_at")))
+    return rows
+
+
 def _import_sources(conn: sqlite3.Connection):
     """从 source 文件导入全部数据。每个阶段一个事务;异常向上抛,由 rebuild 清理临时库。"""
     # 1) 仓库元数据:repos 快照(INSERT OR IGNORE = first-wins,与历史行为一致;
@@ -311,16 +324,19 @@ def _import_sources(conn: sqlite3.Connection):
         )
         conn.commit()
 
-    # 4) 推送日志
+    # 4) 推送日志:live 文件 + archive/*.jsonl 月度归档合并导入(rotate_logs 把过期
+    #    明细移入归档,数据库不能丢这些历史)。归档目录不存在时行为与旧版一致。
+    #    同键冲突 INSERT OR REPLACE 后写覆盖,live 文件最后导入 → 当前状态优先。
+    push_records = []
+    archive_dir = DAILY_DIR / "archive"
+    if archive_dir.exists():
+        for archive_file in sorted(archive_dir.glob("*.jsonl")):
+            push_records.extend(_push_log_rows(archive_file))
     push_file = DAILY_DIR / "push_log.jsonl"
     if push_file.exists():
-        records = []
-        for line in push_file.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            records.append((r["date"], r["list_type"], r["full_name"], r.get("pushed_at")))
-        conn.executemany("INSERT OR REPLACE INTO push_log VALUES (?,?,?,?)", records)
+        push_records.extend(_push_log_rows(push_file))
+    if push_records:
+        conn.executemany("INSERT OR REPLACE INTO push_log VALUES (?,?,?,?)", push_records)
         conn.commit()
 
 

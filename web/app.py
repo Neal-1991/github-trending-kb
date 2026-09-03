@@ -226,6 +226,71 @@ def search(request: Request, conn: sqlite3.Connection = Depends(get_db),
     })
 
 
+WEEK_OPTIONS = (4, 8, 13, 26, 52)
+DEFAULT_WEEKS = 8
+
+
+def _parse_weeks(raw: str) -> int:
+    """weeks 白名单校验:非数字或不在允许列表的值一律回退默认 8 周。"""
+    try:
+        w = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_WEEKS
+    return w if w in WEEK_OPTIONS else DEFAULT_WEEKS
+
+
+def _week_group_label(d: date) -> tuple[str, str]:
+    """按 ISO 自然周算分组 key 与标题,如 '2026-W36(09-01 ~ 09-07)'。"""
+    iso = d.isocalendar()
+    monday = date.fromisocalendar(iso[0], iso[1], 1)
+    sunday = date.fromisocalendar(iso[0], iso[1], 7)
+    key = f"{iso[0]}-W{iso[1]:02d}"
+    return key, f"{key}（{monday:%m-%d} ~ {sunday:%m-%d}）"
+
+
+@app.get("/new-faces", response_class=HTMLResponse)
+def new_faces(request: Request, conn: sqlite3.Connection = Depends(get_db),
+              lang: str = "", weeks: str = ""):
+    """新面孔专页:按首次上榜日(trusted 口径)倒序,再按自然周分组展示。"""
+    n_weeks = _parse_weeks(weeks)
+    langs = conn.execute("""
+      SELECT DISTINCT language FROM repos
+      WHERE language IS NOT NULL ORDER BY language
+    """).fetchall()
+    sql = ("SELECT r.full_name, r.first_trend_date, r.language, r.best_daily_stars,"
+           " r.best_rank, p.one_liner"
+           " FROM repos r LEFT JOIN profiles p ON p.full_name = r.full_name"
+           " WHERE r.first_trend_date IS NOT NULL"
+           " AND r.first_trend_date >= date('now', ?)")
+    params: list = [f"-{n_weeks * 7} day"]
+    if lang:
+        sql += " AND r.language = ?"
+        params.append(lang)
+    sql += " ORDER BY r.first_trend_date DESC, r.best_daily_stars DESC"
+    rows = conn.execute(sql, params).fetchall()
+
+    # 按首次上榜日所在自然周分组;行已按日期倒序,组序即倒序(最新周在前)
+    groups: list[dict] = []
+    by_key: dict[str, dict] = {}
+    for r in rows:
+        item = dict(r)
+        item["top3"] = r["best_rank"] is not None and r["best_rank"] <= 3
+        try:
+            key, label = _week_group_label(date.fromisoformat(str(r["first_trend_date"])))
+        except ValueError:
+            key, label = "?", "日期待定"
+        g = by_key.get(key)
+        if g is None:
+            g = {"key": key, "label": label, "rows": []}
+            by_key[key] = g
+            groups.append(g)
+        g["rows"].append(item)
+    return templates.TemplateResponse(request, "new_faces.html", {
+        "groups": groups, "langs": langs, "sel_lang": lang,
+        "weeks": n_weeks, "week_options": WEEK_OPTIONS, "total": len(rows),
+    })
+
+
 @app.get("/repo/{full_name:path}", response_class=HTMLResponse)
 def repo_detail(request: Request, full_name: str,
                 conn: sqlite3.Connection = Depends(get_db)):

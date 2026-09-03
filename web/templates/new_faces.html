@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}新面孔 · GitHub 趋势榜知识库{% endblock %}
+{% block content %}
+<h1>新面孔 · 首次上榜</h1>
+<p class="muted">口径:统计最近 {{ weeks }} 周内首次登上趋势榜(含历史重建榜与每日真实抓取榜,trusted
+可信口径)的项目;"单日峰值"为可信口径下单日最高新增星标(疑似刷星已排除);
+按首次上榜日所在自然周(周一 ~ 周日)倒序分组。</p>
+
+<form method="get" action="{{ url_for('new_faces') }}" class="search-form">
+  <label class="visually-hidden" for="lang">语言</label>
+  <select id="lang" name="lang">
+    <option value="">全部语言</option>
+    {% for l in langs %}
+    <option value="{{ l.language }}" {% if l.language == sel_lang %}selected{% endif %}>{{ l.language }}</option>
+    {% endfor %}
+  </select>
+  <label class="visually-hidden" for="weeks">时间范围</label>
+  <select id="weeks" name="weeks">
+    {% for w in week_options %}
+    <option value="{{ w }}" {% if w == weeks %}selected{% endif %}>最近 {{ w }} 周</option>
+    {% endfor %}
+  </select>
+  <button type="submit">查看</button>
+</form>
+
+{% for g in groups %}
+<h2>{{ g.label }}</h2>
+<div class="table-wrap">
+<table>
+  <caption class="visually-hidden">{{ g.label }} 首次上榜的项目</caption>
+  <thead>
+  <tr><th scope="col">仓库</th><th scope="col">首次上榜</th><th scope="col">语言</th><th scope="col">单日峰值</th><th scope="col">一句话画像</th></tr>
+  </thead>
+  <tbody>
+  {% for r in g.rows %}
+  <tr>
+    <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a>
+      {% if r.top3 %}<span class="badge warn">上榜即 Top3</span>{% endif %}</td>
+    <td>{{ r.first_trend_date }}</td>
+    <td>{{ r.language or "—" }}</td>
+    <td>{{ r.best_daily_stars or "—" }}</td>
+    <td class="muted">{{ r.one_liner or "—" }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<div class="notice">该筛选条件下暂无新面孔:试试"全部语言",或把时间范围放宽到 13 / 26 / 52 周。</div>
+{% endfor %}
+
+<p class="muted">本期共 {{ total }} 个新面孔{% if sel_lang %} · 语言:{{ sel_lang }}{% endif %} · 时间范围:最近 {{ weeks }} 周。</p>
+{% endblock %}

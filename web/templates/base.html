@@ -11,6 +11,7 @@
 <nav aria-label="站点导航">
   <a class="brand" href="{{ url_for('index') }}">📈 趋势榜知识库</a>
   <a href="{{ url_for('search') }}" {% if request.url.path.endswith('/search') %}aria-current="page"{% endif %}>检索</a>
+  <a href="{{ url_for('new_faces') }}" {% if request.url.path.endswith('/new-faces') %}aria-current="page"{% endif %}>新面孔</a>
   <a href="{{ url_for('trends') }}" {% if request.url.path.endswith('/trends') %}aria-current="page"{% endif %}>趋势图谱</a>
   <a href="{{ url_for('browse') }}" {% if request.url.path.endswith('/browse') %}aria-current="page"{% endif %}>按日浏览</a>
   <form action="{{ url_for('search') }}" method="get" class="nav-search" role="search">

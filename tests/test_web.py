@@ -1,5 +1,7 @@
 """Web 检索边界、XSS、健康检查(T18/T19/T21/T23)。"""
 
+from datetime import date, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -321,3 +323,134 @@ def test_api_day_both_missing_404(client):
     r = client.get("/api/day/1999-01-01")
     assert r.status_code == 404
     assert "detail" in r.json()
+
+
+# ---------- 任务 F:新面孔专页 /new-faces ----------
+
+def _add_new_face(full_name, first_date, *, lang=None, best_rank=None,
+                  best_daily_stars=None, one_liner=None):
+    """在沙箱库补插带 first_trend_date / best_rank 的新面孔样本(测试专用)。"""
+    from scripts.db import connect
+    conn = connect()
+    conn.execute("INSERT OR REPLACE INTO repos (full_name, language, verified, source,"
+                 " first_trend_date, best_rank, best_daily_stars)"
+                 " VALUES (?, ?, 1, 'api', ?, ?, ?)",
+                 (full_name, lang, first_date, best_rank, best_daily_stars))
+    if one_liner is not None:
+        conn.execute("INSERT OR REPLACE INTO profiles (full_name, one_liner) VALUES (?, ?)",
+                     (full_name, one_liner))
+    conn.commit()
+    conn.close()
+
+
+def _week_label(iso_day: str) -> str:
+    """按被测页同口径独立复算自然周组标题,如 '2026-W36(09-01 ~ 09-07)'。"""
+    d = date.fromisoformat(iso_day)
+    iso = d.isocalendar()
+    monday = date.fromisocalendar(iso[0], iso[1], 1)
+    sunday = date.fromisocalendar(iso[0], iso[1], 7)
+    return f"{iso[0]}-W{iso[1]:02d}（{monday:%m-%d} ~ {sunday:%m-%d}）"
+
+
+def test_new_faces_page_ok_and_grouped(client):
+    recent = (date.today() - timedelta(days=1)).isoformat()
+    _add_new_face("fresh/one", recent, lang="Rust", best_rank=2,
+                  best_daily_stars=321, one_liner="全新爆发项目")
+    r = client.get("/new-faces")
+    assert r.status_code == 200
+    assert "新面孔 · 首次上榜" in r.text
+    assert _week_label(recent) in r.text          # 自然周分组标题
+    assert "fresh/one" in r.text
+    assert "/repo/fresh/one" in r.text            # 仓库名链接指向详情页
+    assert "全新爆发项目" in r.text                # 一句话画像
+    assert "上榜即 Top3" in r.text                 # best_rank <= 3 徽标
+    assert "本期共 1 个新面孔" in r.text           # 页脚总数
+    # 导航含新面孔入口,且当前页高亮
+    assert ">新面孔</a>" in r.text
+    assert 'aria-current="page"' in r.text
+
+
+def test_new_faces_uses_full_lang_list(client):
+    # 语言下拉 = 全量 DISTINCT language(含样本里只有 1 个的冷门语言)
+    _add_new_face("cold/lang", (date.today() - timedelta(days=1)).isoformat(),
+                  lang="Coldlang")
+    r = client.get("/new-faces")
+    assert r.status_code == 200
+    assert "<option value=\"Coldlang\"" in r.text
+
+
+def test_new_faces_lang_filter(client):
+    d = (date.today() - timedelta(days=2)).isoformat()
+    _add_new_face("rust/only", d, lang="Rust", best_daily_stars=10)
+    _add_new_face("zig/only", d, lang="Zig", best_daily_stars=20)
+    r = client.get("/new-faces", params={"lang": "Zig"})
+    assert r.status_code == 200
+    assert "zig/only" in r.text
+    assert "rust/only" not in r.text
+    # 下拉里不存在的语言值 → 结果为空并给出友好空态
+    r = client.get("/new-faces", params={"lang": "Cobol"})
+    assert r.status_code == 200
+    assert "rust/only" not in r.text and "zig/only" not in r.text
+    assert "暂无新面孔" in r.text
+    assert "本期共 0 个新面孔" in r.text
+
+
+def test_new_faces_top3_badge_only_for_best_rank_le_3(client):
+    d = (date.today() - timedelta(days=2)).isoformat()
+    _add_new_face("top/three", d, lang="Rust", best_rank=2, best_daily_stars=500)
+    _add_new_face("low/rank", d, lang="Go", best_rank=25, best_daily_stars=90)
+    _add_new_face("null/rank", d, lang="Zig")  # best_rank 为 NULL 不得报错
+    r = client.get("/new-faces")
+    assert r.status_code == 200
+    assert r.text.count("上榜即 Top3") == 1  # 仅 top/three 有徽标
+    assert "low/rank" in r.text and "null/rank" in r.text
+
+
+def test_new_faces_weeks_window(client):
+    recent = (date.today() - timedelta(days=3)).isoformat()
+    oldish = (date.today() - timedelta(days=40)).isoformat()
+    _add_new_face("recent/face", recent, lang="Rust")
+    _add_new_face("older/face", oldish, lang="Rust")
+    r = client.get("/new-faces", params={"weeks": "4"})
+    assert r.status_code == 200
+    assert "recent/face" in r.text
+    assert "older/face" not in r.text
+    r = client.get("/new-faces", params={"weeks": "8"})
+    assert r.status_code == 200
+    assert "older/face" in r.text
+
+
+def test_new_faces_invalid_weeks_falls_back_to_default(client):
+    # 40 天前的样本不在 4 周窗口内,但在默认 8 周窗口内:非法 weeks 回退即可见
+    d = (date.today() - timedelta(days=40)).isoformat()
+    _add_new_face("older/face", d, lang="Rust")
+    for bad in ("7", "0", "-4", "999", "abc", "1e9", "<script>"):
+        r = client.get("/new-faces", params={"weeks": bad})
+        assert r.status_code == 200, f"weeks={bad!r} 不应 500"
+        assert "older/face" in r.text
+        assert "最近 8 周" in r.text  # 回退默认 8 周
+
+
+def test_new_faces_groups_desc_and_sorted_by_stars(client):
+    d_new = (date.today() - timedelta(days=1)).isoformat()
+    d_old = (date.today() - timedelta(days=40)).isoformat()
+    _add_new_face("fresh/one", d_new, lang="Rust", best_daily_stars=50)
+    _add_new_face("older/face", d_old, lang="Rust", best_daily_stars=99)
+    # 同一周内按单日峰值降序
+    _add_new_face("hot/later", d_new, lang="Go", best_daily_stars=100)
+    _add_new_face("hot/earlier", d_new, lang="Go", best_daily_stars=900)
+    r = client.get("/new-faces")
+    assert r.status_code == 200
+    assert _week_label(d_new) in r.text and _week_label(d_old) in r.text
+    # 组倒序:新周在前
+    assert r.text.index(_week_label(d_new)) < r.text.index(_week_label(d_old))
+    # 组内按峰值降序
+    assert r.text.index("hot/earlier") < r.text.index("hot/later")
+
+
+def test_new_faces_empty_db_friendly(client):
+    # 夹具里的 owner 仓库首次上榜日为 2022-03-01,不在 8 周窗口 → 空态
+    r = client.get("/new-faces")
+    assert r.status_code == 200
+    assert "暂无新面孔" in r.text
+    assert "本期共 0 个新面孔" in r.text

@@ -17,6 +17,7 @@ def _records(n=12):
 def no_network(monkeypatch):
     """屏蔽一切外部调用:抓取返回固定样本,GLM/GitHub API/README/飞书均可断言。"""
     calls = {"fetch": 0, "send": 0, "doc": 0}
+    monkeypatch.setattr(daily_job, "today_bj", lambda: "2026-09-01")
     records = _records()
 
     def fake_fetch_all():
@@ -76,6 +77,7 @@ def test_dry_run_has_zero_source_side_effects(sandbox, no_network):
 
 
 def test_main_dry_run_does_not_replace_project_db(sandbox, no_network, monkeypatch):
+    monkeypatch.setattr(daily_job, "today_bj", lambda: "2026-09-02")
     write_source_files(sandbox)
     conn = rebuild()
     conn.close()

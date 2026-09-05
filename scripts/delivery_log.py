@@ -33,14 +33,18 @@ def append_event(path: Path | None = None, **event) -> dict:
 
 def _iter_events(path: Path | None = None):
     p = path or DELIVERY_LOG
-    if not p.exists():
-        return
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    # 月度归档混存 push 与 delivery；先历史后 live，保留各文件追加顺序。
+    for source in [*sorted((p.parent / "archive").glob("*.jsonl")), p]:
+        if not source.exists():
+            continue
+        for line in source.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    yield event
 
 
 def latest_event(kind: str, date: str, path: Path | None = None,
@@ -56,6 +60,7 @@ def latest_event(kind: str, date: str, path: Path | None = None,
 
 def legacy_doc_done(date: str) -> bool:
     """旧 doc_log.jsonl 精确日期键已发送；日报与 week- 周报互不混用。"""
+    # doc_log 不参与混合归档，避免把 delivery 的失败事件当成旧文档成功。
     if not LEGACY_DOC_LOG.exists():
         return False
     for line in LEGACY_DOC_LOG.read_text(encoding="utf-8").splitlines():
@@ -65,9 +70,5 @@ def legacy_doc_done(date: str) -> bool:
 
 
 def legacy_daily_pushed(date: str) -> bool:
-    if not LEGACY_PUSH_LOG.exists():
-        return False
-    for line in LEGACY_PUSH_LOG.read_text(encoding="utf-8").splitlines():
-        if line.strip() and json.loads(line).get("date") == date:
-            return True
-    return False
+    return any(e.get("date") == date and "list_type" in e and "full_name" in e
+               and "kind" not in e for e in _iter_events(LEGACY_PUSH_LOG))

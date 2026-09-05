@@ -11,6 +11,9 @@
   <div class="card"><b>{{ stats.new_week }}</b><span>近 7 天新面孔</span></div>
 </div>
 
+<p class="muted">画像覆盖率 {{ profile_coverage }}%{% if latest_real_date %} · 最新采集日期 {{ latest_real_date }} · 距今 {{ freshness_days }} 天（北京时间）{% endif %}</p>
+{% if freshness_days %}<div class="notice">数据尚未更新至今日，请查看采集任务状态。</div>{% endif %}
+
 {% if latest_real %}
 <h2>最新真实趋势榜 · {{ latest_real_date }}</h2>
 <ol class="list">
@@ -20,7 +23,7 @@
   {% endfor %}
 </ol>
 {% else %}
-<div class="notice">真实榜单尚未接入:配置 .env 并跑一次 <code>python scripts/daily_job.py --dry-run</code>,或等 Actions 定时任务。</div>
+<div class="notice">真实榜单尚未接入:配置 .env 并跑一次 <code>python scripts/daily_job.py --capture-only</code>,或等 Actions 定时任务。</div>
 {% endif %}
 
 <h2>最近新面孔</h2>
@@ -42,6 +45,5 @@
 </table>
 </div>
 
-<div class="notice muted-note">已知数据缺口:GH Archive 公共数据源在 <b>2026-02 之后</b>摄入降级,
-该区间历史重建缺榜,由每日真实榜单自 2026-08-30 起接力补齐。</div>
+{% if gap_note %}<div class="notice muted-note">{{ gap_note }}</div>{% endif %}
 {% endblock %}

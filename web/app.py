@@ -17,7 +17,7 @@ import html
 import json
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -52,7 +52,10 @@ async def security_headers(request: Request, call_next):
 
 
 def get_db():
-    conn = connect_ro()
+    try:
+        conn = connect_ro()
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(status_code=503, detail="数据库暂不可用") from exc
     try:
         yield conn
     finally:
@@ -141,6 +144,10 @@ def index(request: Request, conn: sqlite3.Connection = Depends(get_db)):
       ORDER BY rank LIMIT 10
     """).fetchall()
     latest_real_date = latest_real[0]["date"] if latest_real else None
+    today = datetime.now(timezone(timedelta(hours=8))).date()
+    freshness_days = (max(0, (today - date.fromisoformat(latest_real_date)).days)
+                      if latest_real_date else None)
+    profile_coverage = round(stats["profiles"] / stats["repos_all"] * 100, 1) if stats["repos_all"] else 0
     new_faces = conn.execute("""
       SELECT full_name, first_trend_date, language, best_daily_stars, description
       FROM repos WHERE first_trend_date IS NOT NULL
@@ -148,7 +155,8 @@ def index(request: Request, conn: sqlite3.Connection = Depends(get_db)):
     """).fetchall()
     return templates.TemplateResponse(request, "index.html", {
         "stats": stats, "latest_real": latest_real, "latest_real_date": latest_real_date,
-        "new_faces": new_faces,
+        "new_faces": new_faces, "freshness_days": freshness_days,
+        "profile_coverage": profile_coverage, "gap_note": data_gap_note(conn),
     })
 
 
@@ -325,8 +333,7 @@ def repo_detail(request: Request, full_name: str,
       ORDER BY date
     """, (full_name,)).fetchall()
     if rank_rows:
-        rank_note = ("口径:历史重建榜(arch:total)trusted 记录;"
-                     "2026-02 ~ 2026-08 存在数据缺口。")
+        rank_note = "口径:历史重建榜(arch:total)trusted 记录。" + data_gap_note(conn)
     else:
         rank_rows = conn.execute("""
           SELECT date, rank FROM trend_daily
@@ -344,6 +351,8 @@ def repo_detail(request: Request, full_name: str,
     return templates.TemplateResponse(request, "repo.html", {
         "r": repo, "trend": trend, "all_count": len(all_trend), "spark": spark,
         "rank_svg": rank_svg, "rank_note": rank_note, "topics": topics,
+        "identity_risk": bool(repo.get("created_at") and repo.get("first_trend_date")
+                              and repo["created_at"][:10] > repo["first_trend_date"]),
     })
 
 
@@ -364,6 +373,26 @@ def _list_type_label(list_type: str) -> str:
         lang = list_type[len("lang:"):]
         return f"真实语言榜 · {_LANG_DISPLAY.get(lang, lang.capitalize())}"
     return list_type
+
+
+def data_gap_note(conn: sqlite3.Connection) -> str:
+    # 按库内日期展示历史重建榜与真实抓取榜之间的缺口。
+    gap_note = ""
+    arch_span = conn.execute(
+        "SELECT MIN(date) a, MAX(date) b FROM trend_daily WHERE list_type='arch:total'"
+    ).fetchone()
+    real_min = conn.execute(
+        "SELECT MIN(date) m FROM trend_daily WHERE list_type='total'").fetchone()["m"]
+    if arch_span["b"] and real_min:
+        missing = (date.fromisoformat(real_min) - date.fromisoformat(arch_span["b"])).days - 1
+        if missing > 0:
+            gap_start = (date.fromisoformat(arch_span["b"]) + timedelta(days=1)).isoformat()
+            gap_end = (date.fromisoformat(real_min) - timedelta(days=1)).isoformat()
+            gap_note = (f"历史重建榜覆盖 {arch_span['a']} ~ {arch_span['b']},"
+                        f"真实抓取榜自 {real_min} 起;"
+                        f"{gap_start} ~ {gap_end}({missing} 天)暂无数据。")
+
+    return gap_note
 
 
 @app.get("/browse", response_class=HTMLResponse)
@@ -436,21 +465,7 @@ def browse(request: Request, conn: sqlite3.Connection = Depends(get_db),
       WHERE date = ? AND list_type = ? ORDER BY rank
     """, (d, list_type)).fetchall()
 
-    # 数据缺口提示:历史重建榜末日与真实抓取榜首日之间的空洞(ARCH_END 之后源数据崩坏)
-    gap_note = ""
-    arch_span = conn.execute(
-        "SELECT MIN(date) a, MAX(date) b FROM trend_daily WHERE list_type='arch:total'"
-    ).fetchone()
-    real_min = conn.execute(
-        "SELECT MIN(date) m FROM trend_daily WHERE list_type='total'").fetchone()["m"]
-    if arch_span["b"] and real_min:
-        missing = (date.fromisoformat(real_min) - date.fromisoformat(arch_span["b"])).days - 1
-        if missing > 0:
-            gap_start = (date.fromisoformat(arch_span["b"]) + timedelta(days=1)).isoformat()
-            gap_end = (date.fromisoformat(real_min) - timedelta(days=1)).isoformat()
-            gap_note = (f"历史重建榜覆盖 {arch_span['a']} ~ {arch_span['b']},"
-                        f"真实抓取榜自 {real_min} 起;"
-                        f"{gap_start} ~ {gap_end}({missing} 天)暂无数据。")
+    gap_note = data_gap_note(conn)
 
     return templates.TemplateResponse(request, "browse.html", {
         "d": d, "list_type": list_type, "list_type_label": _list_type_label(list_type),
@@ -641,21 +656,21 @@ def stacked_bars(quarters: list, series: dict, w: int = 900, h: int = 260) -> st
     gap = w / max(len(quarters), 1)
     out = [f'<svg viewBox="0 0 {w} {h + 24}" class="stacked" role="img" '
            f'aria-label="各季度 Top10 项目语言构成堆叠图">']
+    accumulated = [0] * len(quarters)
     for li, lang in enumerate(series):
         color = PALETTE[li % len(PALETTE)]
         safe_lang = html.escape(str(lang))
-        acc = 0
         for i, qt in enumerate(quarters):
             v = series[lang][i]
             if not v:
                 continue
             th = totals[i]
             bh = v / th * h
-            y = h - acc / th * h - bh
+            y = h - accumulated[i] / th * h - bh
             out.append(f'<rect x="{i * gap + (gap - bar_w) / 2:.1f}" y="{y:.1f}" '
                        f'width="{bar_w:.1f}" height="{bh:.1f}" fill="{color}"><title>'
                        f"{html.escape(str(qt))} {safe_lang}: {v}</title></rect>")
-            acc += v
+            accumulated[i] += v
     for i, qt in enumerate(quarters):
         out.append(f'<text x="{i * gap + gap / 2:.1f}" y="{h + 16}" text-anchor="middle" '
                    f'class="axis">{html.escape(str(qt))[2:]}</text>')

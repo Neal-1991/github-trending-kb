@@ -166,7 +166,7 @@ def test_missing_db_fails_clearly(sandbox, monkeypatch):
     import web.app as webapp
     c = TC(webapp.app, raise_server_exceptions=False)
     r = c.get("/search", params={"q": "x"})
-    assert r.status_code == 500  # 未静默创建空库并 200;明确失败
+    assert r.status_code == 503  # 缺库统一映射为不可用,不创建空库
     assert not sandbox["db"].exists()
 
 
@@ -454,3 +454,73 @@ def test_new_faces_empty_db_friendly(client):
     assert r.status_code == 200
     assert "暂无新面孔" in r.text
     assert "本期共 0 个新面孔" in r.text
+
+
+@pytest.mark.parametrize("series, expected", [
+    ({"A": [1], "B": [1]}, [(50, 50), (0, 50)]),
+    ({"A": [1, 3], "B": [3, 1]}, [(75, 25), (25, 75), (0, 75), (0, 25)]),
+])
+def test_stacked_bars_geometry(series, expected):
+    import xml.etree.ElementTree as ET
+
+    from web.app import stacked_bars
+    quarters = [f"2026Q{i + 1}" for i in range(len(series["A"]))]
+    svg = stacked_bars(quarters, series, h=100).split("</svg>")[0] + "</svg>"
+    rects = ET.fromstring(svg).findall("rect")
+    assert [(float(r.attrib["y"]), float(r.attrib["height"])) for r in rects] == expected
+
+
+def test_readyz_missing_db_is_503(sandbox):
+    import web.app as webapp
+    c = TestClient(webapp.app)
+    assert c.get("/healthz").status_code == 200
+    assert c.get("/readyz").status_code == 503
+    assert not sandbox["db"].exists()
+
+
+def test_readyz_unreadable_db_is_503(sandbox, monkeypatch):
+    import sqlite3
+
+    import web.app as webapp
+
+    def fail():
+        raise sqlite3.OperationalError("unable to open database")
+
+    monkeypatch.setattr(webapp, "connect_ro", fail)
+    assert TestClient(webapp.app).get("/readyz").status_code == 503
+
+
+def test_detail_and_home_gap_uses_database_span(client):
+    for path in ("/", "/repo/owner0/repo0"):
+        page = client.get(path).text
+        assert "2022-04-02 ~ 2026-08-31" in page
+        assert "2026-02 ~ 2026-08" not in page
+    _add_rows(("2026-08-31", "arch:total", 1, "owner0/repo0", 10, "full"))
+    for path in ("/", "/repo/owner0/repo0"):
+        assert "暂无数据" not in client.get(path).text
+
+
+def test_home_freshness_and_empty_capture_instruction(client):
+    page = client.get("/").text
+    assert "最新采集日期 2026-09-01" in page
+    assert "画像覆盖率" in page
+    from scripts.db import connect
+    conn = connect()
+    conn.execute("DELETE FROM trend_daily WHERE list_type='total'")
+    conn.commit()
+    conn.close()
+    page = client.get("/").text
+    assert "--capture-only" in page
+    assert "--dry-run" not in page
+
+
+def test_detail_warns_only_for_creation_after_first_trend(client):
+    from scripts.db import connect
+    conn = connect()
+    conn.execute("UPDATE repos SET created_at='2026-09-01T00:00:00Z' WHERE full_name='owner0/repo0'")
+    conn.commit()
+    assert "身份信息待核验" in client.get("/repo/owner0/repo0").text
+    conn.execute("UPDATE repos SET created_at='2022-03-01T12:00:00Z' WHERE full_name='owner0/repo0'")
+    conn.commit()
+    conn.close()
+    assert "身份信息待核验" not in client.get("/repo/owner0/repo0").text

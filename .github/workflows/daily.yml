@@ -30,11 +30,10 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.lock
 
-      - name: Preflight tests, rebuild and data audit
+      - name: Preflight tests and lint
         run: |
           python -m pytest -p no:cacheprovider
-          python scripts/build_db.py
-          python scripts/audit_data.py
+          python -m ruff check .
 
       - name: Capture snapshot, profile and rebuild DB
         id: job
@@ -44,8 +43,10 @@ jobs:
           GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
           GLM_MODEL: ${{ vars.GLM_MODEL || 'glm-4.5-flash' }}
         run: |
-          python scripts/daily_job.py --capture-only
-          echo "date=$(python -c 'from scripts.daily_job import today_bj; print(today_bj())')" >> "$GITHUB_OUTPUT"
+          capture_date=$(python -c 'from scripts.daily_job import today_bj; print(today_bj())')
+          python scripts/daily_job.py --capture-only --date "$capture_date"
+          python scripts/audit_data.py
+          echo "date=$capture_date" >> "$GITHUB_OUTPUT"
 
       - name: Commit data
         run: |

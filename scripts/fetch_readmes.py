@@ -52,13 +52,15 @@ def fetch_one(full_name: str) -> str:
             temporary = True
             continue
         if r.status_code == 200 and r.text.strip():
-            out.write_text(r.text[:MAX_CHARS], encoding="utf-8")
+            atomic_write_text(out, r.text[:MAX_CHARS])
             return "ok"
         if r.status_code == 404:
             continue
         if r.status_code == 429:
             time.sleep(10)
             rate_limited = True
+        else:
+            temporary = True  # 403/5xx/空 200 均不能证明仓库永久没有 README。
     if rate_limited:
         return "rate_limited"
     if temporary:

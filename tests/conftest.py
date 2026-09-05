@@ -13,7 +13,19 @@ sys.path.insert(0, str(ROOT))
 
 _WATCHED = ["daily/push_log.jsonl", "daily/trends.jsonl", "daily/doc_log.jsonl",
             "daily/delivery_log.jsonl", "profiles/profiles.jsonl",
+            "profiles/pending_queue.json",
             "raw/repo_meta_api.jsonl", "raw/repo_gone.jsonl"]
+
+
+@pytest.fixture(autouse=True)
+def block_real_requests(monkeypatch):
+    """所有测试默认禁止 requests 出网；外部服务必须在调用边界显式 mock。"""
+    import requests
+
+    def blocked(*args, **kwargs):
+        raise AssertionError("测试不得调用真实网络，请 mock 外部服务")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", blocked)
 
 
 @pytest.fixture(autouse=True)

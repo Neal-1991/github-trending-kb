@@ -6,7 +6,7 @@
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| 五年历史重建榜 | ✅ 已完成 | GH Archive 星标事件重建每日 Top50(2021-09 ~ 2026-01),80,500 条记录 |
+| 五年历史重建榜 | ✅ 已完成 | GH Archive 星标事件重建每日 Top50(2021-09 ~ 2026-02),81,900 条记录 |
 | 每日真实榜单 | ✅ 已接入 | 每天 08:00(北京时间)GitHub Actions 抓总榜 + Python/TypeScript/JavaScript/Rust 分榜 |
 | AI 项目画像 | ✅ 持续生成 | 用途/解决的问题、边界与不适用、技术栈与亮点、成熟度与 License 四维画像(数量见首页统计) |
 | 飞书推送 | ✅ 待配 webhook | 日报单条消息(文档链接卡片或摘要卡片)+ 周日周报 |
@@ -42,10 +42,14 @@ python scripts/audit_data.py
 | `--dry-run` | 零副作用预览,预览文件写入系统临时目录 |
 | `--capture-only` | 只捕获快照 + 画像 + 重建(CI Job A),不通知 |
 | `--notify-only --date D` | 只回放 D 日 canonical 快照并发通知(CI Job B) |
-| `--refresh-snapshot` | 显式抓取新版本替换当日快照,旧版自动归档到 `snapshots/history/` |
-| `--date D` | 指定日期回放 |
+| `--refresh-snapshot` | 仅允许刷新今天的快照,旧版自动归档到 `snapshots/history/` |
+| `--date D` | 历史日期只回放 canonical/legacy,缺数据明确报错;拒绝未来日期 |
 
 每日榜单以**不可变快照**落盘:`data/daily/snapshots/YYYY/MM/YYYY-MM-DD.json`(含内容寻址 `snapshot_id`)。当日快照已存在时默认回放,不重新抓取;`data/daily/trends.jsonl` 保留为兼容导出。通知(日报/周报/云文档链接)在 `data/daily/delivery_log.jsonl` 中按事件独立管理状态,语义为"至少一次 + 可检测重复";数据提交与通知分属两个 CI job,通知失败不影响数据落库。
+
+今日损坏快照会先归档并重新抓取，通过校验后再重建数据库；历史损坏快照保持失败，不用今天的数据替代。日报与周报分别尝试，发送失败记录事件并以非零状态退出，Actions 可识别失败；归档日志仍参与去重。完整运行未配置飞书时生成本地预览，显式 `--notify-only` 未配置通道则报错。
+
+画像积压保存在 `data/profiles/pending_queue.json`，每天最多处理 80 个：当天榜单优先，其余名额处理不再上榜的积压项目。临时失败次日重试，无 README 的仓库 30 天后复查；已完成画像从队列移除。队列跟随数据提交，不依赖 CI 中被清空的 README 缓存。
 
 ## 飞书推送模式
 
@@ -84,6 +88,7 @@ python scripts/audit_data.py
 │   ├── glm_client.py          # GLM 画像客户端(schema 校验 + 重试)
 │   ├── feishu.py / feishu_doc.py  # 飞书卡片/云文档(重试 + 降级)
 │   ├── daily_job.py           # 每日编排:捕获→画像→通知(三阶段解耦)
+│   ├── profile_queue.py       # 持久化跨日画像队列、重试与缺 README 复查
 │   ├── audit_data.py          # 只读数据审计(JSONL/CSV/DB/身份/口径)
 │   └── db.py                  # SQLite schema / FTS / 原子重建(共享层)
 ├── tests/                     # pytest 回归测试(离线,全 mock)
@@ -113,8 +118,8 @@ python scripts/audit_data.py
 
 ## 已知限制
 
-- **2026-02 ~ 2026-08-29 为历史数据缺口**(GH Archive 公共源断流),可选 BigQuery 付费补齐(约 $15-25,见报告第八节)。
+- **2026-03-01 ~ 2026-08-29 为历史数据缺口**(GH Archive 公共源事件密度降至不可信),历史补齐方案见报告;费用需另行核实。
 - 重建榜 ≠ 真实历史榜单(星标增速代理),趋势分析可靠,精确排名不可引用。
 - `repo_meta_snapshot.csv` 存在 85 个重复仓库(61 个字段冲突),导入为 first-wins;`audit_data.py` 会持续报告,待确定性合并。
-- 仓库身份迁移(repo_id 主键)未完成前,改名/同名复用仓库的历史统计与画像存在串档风险(详见 audit 报告的 36 个异常)。
+- 仓库身份迁移(repo_id 主键)未完成前,改名/同名复用仓库的历史统计与画像存在串档风险(异常数量以当前 audit 为准)。详情页对创建日期晚于首次上榜日期的仓库显示风险提示。
 - GitHub trending 页面无官方 API,解析器带批次校验(条数/名次连续/星标覆盖率),页面改版时抓取会显式失败并保存诊断 HTML 到 `data/diagnostics/`,不会写入坏数据。

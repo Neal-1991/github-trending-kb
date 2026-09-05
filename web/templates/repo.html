@@ -2,6 +2,7 @@
 {% block title %}{{ r.full_name }} · 趋势榜知识库{% endblock %}
 {% block content %}
 <h1><a href="https://github.com/{{ r.full_name }}">{{ r.full_name }}</a> ↗</h1>
+{% if identity_risk %}<div class="notice">身份信息待核验：当前仓库创建日期 {{ r.created_at[:10] }} 晚于首次上榜日期 {{ r.first_trend_date }}，历史记录可能对应同名的其他仓库，请谨慎解读历史指标。</div>{% endif %}
 {% if r.one_liner %}<p class="one-liner">{{ r.one_liner }}</p>{% endif %}
 <p class="muted">{{ r.description or "" }}</p>
 

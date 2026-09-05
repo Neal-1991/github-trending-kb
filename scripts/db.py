@@ -141,23 +141,29 @@ def reindex_fts(conn: sqlite3.Connection):
     version = sqlite_version()
     has_trigram = version >= (3, 34, 0)
     tokenizer = "tokenize='trigram'" if has_trigram else "tokenize='unicode61'"
-    conn.executescript(f"""
-      DROP TABLE IF EXISTS search_fts;
-      CREATE VIRTUAL TABLE search_fts USING fts5(
+    # executescript 会先隐式提交，导致读者看到已 DROP 但尚未填充的索引。
+    # SAVEPOINT 使 DDL 和填充一起发布，也可安全嵌入调用方现有事务。
+    conn.execute("SAVEPOINT rebuild_search_fts")
+    try:
+        conn.execute("DROP TABLE IF EXISTS search_fts")
+        conn.execute(f"""CREATE VIRTUAL TABLE search_fts USING fts5(
         full_name, description, topics, language, one_liner,
         purpose, boundaries, tech_highlights, maturity,
         {tokenizer}
-      );
-    """)
-    conn.execute("""
+      )""")
+        conn.execute("""
       INSERT INTO search_fts
       SELECT r.full_name, COALESCE(r.description,''), COALESCE(r.topics,''),
              COALESCE(r.language,''), COALESCE(p.one_liner,''),
              COALESCE(p.purpose,''), COALESCE(p.boundaries,''),
              COALESCE(p.tech_highlights,''), COALESCE(p.maturity,'')
       FROM repos r LEFT JOIN profiles p USING (full_name)
-    """)
-    conn.commit()
+        """)
+        conn.execute("RELEASE SAVEPOINT rebuild_search_fts")
+    except BaseException:
+        conn.execute("ROLLBACK TO SAVEPOINT rebuild_search_fts")
+        conn.execute("RELEASE SAVEPOINT rebuild_search_fts")
+        raise
 
 
 def refresh_repo_stats(conn: sqlite3.Connection):
@@ -358,10 +364,12 @@ def _import_sources(conn: sqlite3.Connection):
     # 2b) 趋势:canonical 快照是主来源；trends.jsonl 仅补没有 canonical 的历史日期。
     canonical_dates = set()
     snapshot_entries = []
+    trend_metadata = []
     for snapshot in iter_snapshots():
         date = snapshot["date"]
         canonical_dates.add(date)
         for rec in snapshot_to_records(snapshot):
+            trend_metadata.append((date, rec))
             for e in rec["entries"]:
                 snapshot_entries.append((date, rec["list_type"], e["rank"], e["repo"],
                                          e.get("stars_today"), None, 0))
@@ -383,6 +391,7 @@ def _import_sources(conn: sqlite3.Connection):
             rec = json.loads(line)
             if rec["date"] in canonical_dates:
                 continue
+            trend_metadata.append((rec["date"], rec))
             for e in rec["entries"]:
                 entries.append((rec["date"], rec["list_type"], e["rank"], e["repo"],
                                 e.get("stars_today"), None, 0))
@@ -392,6 +401,17 @@ def _import_sources(conn: sqlite3.Connection):
             " VALUES (?,?,?,?,?,?,?)",
             entries)
         conn.commit()
+
+    # 与按日增量写入一致：首次观测保留、同日总榜优先；可靠 API/CSV
+    # 已先导入，因此不会被低可信榜单字段（包括空值）覆盖。
+    trend_metadata.sort(key=lambda item: (item[0], item[1]["list_type"] != "total"))
+    conn.executemany(
+        "INSERT OR IGNORE INTO repos (full_name, description, language, verified, source)"
+        " VALUES (?,?,?,0,'trending')",
+        ((e["repo"], e.get("description"), e.get("language"))
+         for _, rec in trend_metadata for e in rec["entries"]),
+    )
+    conn.commit()
 
     # 2d) 人工覆盖:include=强制真实(flag 0)/exclude=强制疑似刷星(flag 1),仅作用于
     #     arch:total 行;文件缺失视为无覆盖,不可解析则抛错 → rebuild fail closed。

@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import (
     DAILY_DIR,
@@ -85,14 +87,20 @@ def sync_compat_records(date: str, records: list[dict]) -> None:
 
 # ---------- 阶段 1:捕获 ----------
 
-def capture_stage(conn: sqlite3.Connection, date: str, *, refresh: bool, dry_run: bool,
+def capture_stage(conn: sqlite3.Connection | None, date: str, *, refresh: bool, dry_run: bool,
                   notify_only: bool) -> tuple[list[dict], str]:
     """返回 (records, source_id)。dry-run 只抓取预览,不写任何 source 文件。"""
-    if notify_only:
+    parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+    if parsed_date.isoformat() != date:
+        raise ValueError("日期必须为 YYYY-MM-DD")
+    if date > today_bj():
+        raise ValueError("不能捕获或回放未来日期")
+    if refresh and (notify_only or date != today_bj()):
+        raise ValueError("--refresh-snapshot 只允许刷新今天，不能用于历史回放或 notify-only")
+    if notify_only or date != today_bj():
         records, source_id = load_day_records(date)
         if records is None:
-            print(f"ERROR: {date} 无 canonical 快照且无 legacy trends.jsonl,无法回放", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(f"{date} 无 canonical 快照且无 legacy trends.jsonl,无法回放")
         print(f"[capture] 回放 {date} (source={source_id[:24]}...)")
         return records, source_id
 
@@ -163,24 +171,31 @@ def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connect
         meta.setdefault("license", None)
         meta.setdefault("topics", [])
         if GITHUB_TOKEN:
-            m, r = api_fetch(name)
-            wait_for_quota(r)
+            try:
+                m, r = api_fetch(name)
+                wait_for_quota(r)
+            except requests.RequestException as exc:
+                print(f"  [{i}/{len(todo)}] {name}: api 暂时不可用: {type(exc).__name__}")
+                m, r = None, None
             if m:
                 append_jsonl(RAW_META, m)
                 upsert_repo(conn, m, update_existing=True)
                 meta = m
-            else:
+            elif r is not None:
                 print(f"  [{i}/{len(todo)}] {name}: api HTTP {r.status_code}")
         readme_path = README_DIR / (name.replace("/", "__") + ".md")
         status = "cached" if readme_path.exists() else fetch_one(name)
         persist_missing_status({name: "skip" if status == "cached" else status})
         readme = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
         if not readme:
-            if status == "no_readme":
-                conn.execute("UPDATE repos SET profile_status='no_readme' WHERE full_name=?", (name,))
-                conn.commit()
+            conn.execute("UPDATE repos SET profile_status=? WHERE full_name=?",
+                         ("no_readme" if status == "no_readme" else "pending", name))
+            conn.commit()
             print(f"  [{i}/{len(todo)}] {name}: readme={status},跳过 GLM")
             continue
+        conn.execute("UPDATE repos SET profile_status='pending' WHERE full_name=? "
+                     "AND profile_status='no_readme'", (name,))
+        conn.commit()
         input_hash = glm_client.profile_input_hash(name, meta, readme)
         existing_profile = conn.execute(
             "SELECT one_liner FROM profiles WHERE input_hash=?", (input_hash,)).fetchone()
@@ -217,9 +232,9 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
                   dry_run: bool) -> dict:
     """识别新面孔/缺画像项目并画像;把当日榜单行增量写入数据库。"""
     profiled_names = {r["full_name"] for r in conn.execute("SELECT full_name FROM profiles")}
-    profiled_names.update(r["full_name"] for r in conn.execute(
-        "SELECT full_name FROM repos WHERE profile_status='no_readme'"))
     known_names = {r["full_name"] for r in conn.execute("SELECT full_name FROM repos")}
+    earlier_names = {r["full_name"] for r in conn.execute(
+        "SELECT DISTINCT full_name FROM trend_daily WHERE date < ?", (date,))}
     new_names, queued = [], set()
     new_repo_meta = {}
     ordered_records = sorted(enumerate(records), key=lambda pair: (
@@ -227,8 +242,8 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
     for _, rec in ordered_records:
         for e in rec["entries"]:
             name = e["repo"]
-            e["is_new"] = name not in known_names
-            if e["is_new"] and name not in new_repo_meta:
+            e["is_new"] = name not in earlier_names
+            if name not in known_names and name not in new_repo_meta:
                 new_repo_meta[name] = {
                     "full_name": name, "description": e.get("description"),
                     "language": e.get("language"), "verified": 0, "source": "trending",
@@ -239,10 +254,13 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
     if not dry_run:
         for meta in new_repo_meta.values():
             upsert_repo(conn, meta)
-    print(f"[profile] 新面孔 {len(new_repo_meta)},"
+    new_face_count = len({e["repo"] for rec in records for e in rec["entries"] if e["is_new"]})
+    print(f"[profile] 新面孔 {new_face_count},"
           f"待补画像 {len(new_names)}")
 
-    one_liners = profile_new_repos(new_names, dry_run, conn)
+    from scripts.profile_queue import process_queue
+    one_liners = process_queue(conn, new_names, PROFILE_DIR / "pending_queue.json",
+                               today_bj(), MAX_NEW_PROFILES, dry_run, profile_new_repos)
 
     if not dry_run:
         # 当日榜单行增量入库(替代原第二次全量重建)。
@@ -250,18 +268,37 @@ def profile_stage(conn: sqlite3.Connection, records: list[dict], date: str,
         # (显式写 0,与 7 列 schema 对齐,阈值判定只发生在 arch CSV 导入路径)。
         rows = [(date, rec["list_type"], e["rank"], e["repo"], e.get("stars_today"), None, 0)
                 for rec in records for e in rec["entries"]]
-        if rows:
+        with conn:
+            conn.execute("DELETE FROM trend_daily WHERE date=? AND "
+                         "(list_type='total' OR list_type LIKE 'lang:%')", (date,))
             conn.executemany(
                 "INSERT OR REPLACE INTO trend_daily"
                 " (date, list_type, rank, full_name, stars, quality, star_anomaly)"
                 " VALUES (?,?,?,?,?,?,?)", rows)
-            conn.commit()
         refresh_repo_stats(conn)
         reindex_fts(conn)
     return one_liners
 
 
 # ---------- 阶段 3:通知 ----------
+
+
+class NotificationError(RuntimeError):
+    """消息未被发送通道确认；保留状态并让编排器以失败退出。"""
+
+
+def send_notification(card: dict, kind: str, date: str, snapshot_id: str):
+    try:
+        result = feishu.send(card)
+    except (requests.RequestException, RuntimeError) as exc:
+        delivery_log.append_event(kind=kind, date=date, snapshot_id=snapshot_id,
+                                  status="failed", error_type=type(exc).__name__)
+        raise NotificationError(f"{kind} 发送异常: {type(exc).__name__}") from exc
+    if not result[0]:
+        delivery_log.append_event(kind=kind, date=date, snapshot_id=snapshot_id,
+                                  status="failed", error="channel_rejected")
+        raise NotificationError(f"{kind} 未发送成功: {result[1][:200]}")
+    return result
 
 def build_link_card(title: str, template: str, n_entries: int, url: str,
                     note: str, snapshot_id: str) -> dict:
@@ -323,9 +360,10 @@ def push_daily(conn: sqlite3.Connection, date: str, records: list[dict],
                     delivery_log.append_event(kind="daily_doc", date=date, status="created",
                                               document_id=document_id, url=url,
                                               snapshot_id=snapshot_id)
-                ok, msg, message_id = feishu.send(build_link_card(
+                ok, msg, message_id = send_notification(build_link_card(
                     f"📄 GitHub 趋势日报 · {date}", "blue", n_entries, url,
-                    "文档含: 今日速览 / 重点项目画像(四维) / 今日新面孔", snapshot_id))
+                    "文档含: 今日速览 / 重点项目画像(四维) / 今日新面孔", snapshot_id),
+                    "daily_message", date, snapshot_id)
                 print(f"feishu daily doc: ok={ok} {url} {msg[:120]}")
                 if ok:
                     delivery_log.append_event(kind="daily_doc", date=date, status="link_sent",
@@ -343,7 +381,12 @@ def push_daily(conn: sqlite3.Connection, date: str, records: list[dict],
             return
 
     # webhook 模式 / 文档降级
-    ok, msg, message_id = feishu.send(feishu.build_daily_card(date, records, one_liners))
+    stored = {name: p["one_liner"] or "" for name, p in load_profiles_map(conn).items()}
+    stored.update(one_liners)
+    card = feishu.build_daily_card(date, records, stored)
+    card["card"]["elements"].append({"tag": "note", "elements": [
+        {"tag": "plain_text", "content": f"snapshot {snapshot_id}"}]})
+    ok, msg, message_id = send_notification(card, "daily_message", date, snapshot_id)
     print(f"feishu daily: ok={ok} {msg[:200]}")
     if ok:
         delivery_log.append_event(kind="daily_message", date=date, status="sent",
@@ -393,15 +436,19 @@ def push_weekly(conn: sqlite3.Connection, date: str, snapshot_id: str) -> None:
                   - timedelta(days=6)).strftime("%Y-%m-%d")
     top_new = conn.execute("""
         SELECT t.full_name, SUM(t.stars) s FROM trend_daily t
-        WHERE t.date >= ? AND t.rank <= 10 AND t.list_type = 'total'
+        WHERE t.date BETWEEN ? AND ? AND t.rank <= 10 AND t.list_type = 'total'
         GROUP BY t.full_name
         HAVING (SELECT MIN(date) FROM trend_daily t2 WHERE t2.full_name = t.full_name) >= ?
         ORDER BY s DESC LIMIT 10
-    """, (week_start, week_start)).fetchall()
+    """, (week_start, date, week_start)).fetchall()
     new_repos = conn.execute(
-        "SELECT count(*) FROM repos WHERE first_trend_date >= ?", (week_start,)).fetchone()[0]
+        "SELECT count(*) FROM repos WHERE first_trend_date BETWEEN ? AND ?",
+        (week_start, date)).fetchone()[0]
+    week_end = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).date().isoformat()
     profiled = conn.execute(
-        "SELECT count(*) FROM profiles WHERE generated_at >= ?", (week_start,)).fetchone()[0]
+        "SELECT count(*) FROM profiles WHERE julianday(generated_at) >= julianday(?) "
+        "AND julianday(generated_at) < julianday(?)",
+        (f"{week_start}T00:00:00+08:00", f"{week_end}T00:00:00+08:00")).fetchone()[0]
     summary = {"week": f"{week_start} ~ {date}", "new_repos": new_repos,
                "profiled": profiled, "top_new": [(r["full_name"], r["s"]) for r in top_new]}
 
@@ -426,7 +473,9 @@ def push_weekly(conn: sqlite3.Connection, date: str, snapshot_id: str) -> None:
                              "content": f"本周新面孔 **{summary['new_repos']}** 个、"
                                         f"画像 **{summary['profiled']}** 篇。\n"
                                         f"**[📖 打开本周周报文档]({doc['url']})**"}}]}}
-            ok, msg, message_id = feishu.send(card)
+            card["card"]["elements"].append({"tag": "note", "elements": [
+                {"tag": "plain_text", "content": f"snapshot {snapshot_id}"}]})
+            ok, msg, message_id = send_notification(card, "weekly_message", date, snapshot_id)
             print(f"feishu weekly doc: ok={ok} {doc['url']} {msg[:120]}")
             if ok:
                 delivery_log.append_event(kind="weekly_doc", date=date, status="link_sent",
@@ -439,7 +488,10 @@ def push_weekly(conn: sqlite3.Connection, date: str, snapshot_id: str) -> None:
         except feishu_doc.DocScopeError as e:
             print(f"[notify] 周报云文档不可用,降级为摘要卡片: {e}")
 
-    ok, msg, message_id = feishu.send(feishu.build_weekly_card(date, summary))
+    card = feishu.build_weekly_card(date, summary)
+    card["card"]["elements"].append({"tag": "note", "elements": [
+        {"tag": "plain_text", "content": f"snapshot {snapshot_id}"}]})
+    ok, msg, message_id = send_notification(card, "weekly_message", date, snapshot_id)
     print(f"feishu weekly: ok={ok} {msg[:200]}")
     if ok:
         delivery_log.append_event(kind="weekly_message", date=date, status="sent",
@@ -477,6 +529,13 @@ def main():
     temp_owner = None
     conn = None
     try:
+        print(f"[{date}] daily job start "
+              f"(dry_run={args.dry_run} capture_only={args.capture_only} "
+              f"notify_only={args.notify_only} refresh={args.refresh_snapshot})")
+        # 捕获无需 DB；先校验/修复今日快照，再由已验证 source 构建派生库。
+        records, snapshot_id = capture_stage(
+            None, date, refresh=args.refresh_snapshot, dry_run=args.dry_run,
+            notify_only=args.notify_only)
         if args.dry_run:
             # 只在系统临时目录构建派生库，项目内 DB 与目录均不变化。
             temp_owner = tempfile.TemporaryDirectory(prefix="trending-kb-dry-run-")
@@ -486,31 +545,29 @@ def main():
                 d.mkdir(parents=True, exist_ok=True)
             conn = rebuild()
 
-        print(f"[{date}] daily job start "
-              f"(dry_run={args.dry_run} capture_only={args.capture_only} "
-              f"notify_only={args.notify_only} refresh={args.refresh_snapshot})")
-
-        records, snapshot_id = capture_stage(
-            conn, date, refresh=args.refresh_snapshot, dry_run=args.dry_run,
-            notify_only=args.notify_only)
-
         one_liners = {}
         if not args.notify_only:
             one_liners = profile_stage(conn, records, date, dry_run=args.dry_run)
         else:
             stamp_new_faces(records, conn, date)
 
-        if args.dry_run:
+        one_liners = {name: p["one_liner"] or "" for name, p in load_profiles_map(conn).items()}
+        notification_configured = bool(feishu.FEISHU_WEBHOOK or (
+            feishu.FEISHU_APP_ID and feishu.FEISHU_APP_SECRET
+            and (feishu.FEISHU_OPEN_ID or feishu.FEISHU_CHAT_ID)))
+        if args.dry_run or (not args.capture_only and not notification_configured):
             card = feishu.build_daily_card(date, records, one_liners)
             preview = Path(tempfile.gettempdir()) / f"trending_preview_{date}.md"
             preview.write_text(feishu.card_to_markdown(card), encoding="utf-8")
-            print(f"[dry-run] 预览写入系统临时目录: {preview}(项目文件零改动)")
+            print(f"[preview] 预览写入系统临时目录: {preview}")
 
         if not (args.dry_run or args.capture_only):
-            notify_date_weekday = datetime.strptime(date, "%Y-%m-%d").weekday()
-            push_daily(conn, date, records, one_liners, snapshot_id)
-            if notify_date_weekday == 6:
-                push_weekly(conn, date, snapshot_id)
+            if not notification_configured:
+                if args.notify_only:
+                    raise NotificationError("notify-only 未配置发送通道，已生成本地预览")
+                print("[notify] 未配置发送通道，已降级本地预览")
+            else:
+                notify_stage(conn, date, records, one_liners, snapshot_id)
 
         total_repos = conn.execute("SELECT count(*) FROM repos").fetchone()[0]
         total_profiles = conn.execute("SELECT count(*) FROM profiles").fetchone()[0]
@@ -520,6 +577,28 @@ def main():
             conn.close()
         if temp_owner is not None:
             temp_owner.cleanup()
+
+
+def notify_stage(conn, date, records, one_liners, snapshot_id):
+    """各通知独立尝试，失败统一汇总，已成功的事件不会因另一个失败而丢失。"""
+    errors = []
+    jobs = [("daily_message", lambda: push_daily(conn, date, records, one_liners, snapshot_id))]
+    if datetime.strptime(date, "%Y-%m-%d").weekday() == 6:
+        jobs.append(("weekly_message", lambda: push_weekly(conn, date, snapshot_id)))
+    for kind, job in jobs:
+        try:
+            job()
+        except Exception as exc:
+            errors.append(f"{kind}: {type(exc).__name__}")
+            # 文档创建等发生于 send_notification 之前的异常同样需要可观测。
+            if not isinstance(exc, NotificationError):
+                state = delivery_log.latest_event(kind, date, snapshot_id=snapshot_id)
+                if not state or state.get("status") != "sent":
+                    delivery_log.append_event(kind=kind, date=date, snapshot_id=snapshot_id,
+                                              status="failed", error_type=type(exc).__name__)
+            print(f"[notify] {kind} 失败: {type(exc).__name__}", file=sys.stderr)
+    if errors:
+        raise NotificationError("; ".join(errors))
 
 
 if __name__ == "__main__":

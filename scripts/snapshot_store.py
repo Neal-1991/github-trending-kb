@@ -127,7 +127,12 @@ def save_snapshot(snapshot: dict, *, overwrite: bool = False, base: Path | None 
             old = None
         old_id = old.get("snapshot_id") if isinstance(old, dict) else None
         if old_id == snapshot["snapshot_id"]:
-            return path
+            try:
+                validate_snapshot(old, expected_date=snapshot["date"])
+            except SnapshotValidationError:
+                pass  # 旧 id 字段不能证明内容完好；损坏原文仍需归档并替换。
+            else:
+                return path
         if not overwrite:
             raise SnapshotExistsError(
                 f"{path} 已存在(snapshot_id={old_id or '损坏/无法解析'});"

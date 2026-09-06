@@ -86,3 +86,4 @@ ol.list li { padding: 4px 0; }
 .preparing-panel p { color: var(--muted); font-size: 14px; line-height: 1.7; }
 .preparing-hint { font-size: 12.5px !important; margin-top: 6px; }
 .preparing-panel .sync-button { margin-top: 16px; padding: 8px 18px; }
+.quality-note { font-size: 12px; margin: 6px 2px 0; }

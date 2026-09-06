@@ -31,7 +31,8 @@
 <table>
   <caption class="visually-hidden">当日榜单</caption>
   <thead>
-  <tr><th scope="col">#</th><th scope="col">仓库</th><th scope="col">当日新增星标</th><th scope="col">数据质量</th></tr>
+  <tr><th scope="col">#</th><th scope="col">仓库</th><th scope="col">当日新增星标</th>
+      <th scope="col" title="数据质量仅历史重建榜(arch:total)有值:full/partial/degraded 表示当月 GH Archive 事件密度分层的可信度(full 全可信,partial 仅 Top10 可信,degraded 不参与聚合);真实抓取榜由捕获校验保证,无此分层。">数据质量</th></tr>
   </thead>
   <tbody>
   {% for r in rows %}
@@ -39,7 +40,7 @@
     <td>{{ r.rank }}</td>
     <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a></td>
     <td>{{ r.stars }}</td>
-    <td>{% if r.quality == 'partial' %}<span class="badge warn">partial</span>{% else %}{{ r.quality or "" }}{% endif %}</td>
+    <td>{% if r.quality == 'partial' %}<span class="badge warn">partial</span>{% else %}{{ r.quality or "—" }}{% endif %}</td>
   </tr>
   {% else %}
   <tr><td colspan="4" class="muted">该日期无榜单数据。</td></tr>
@@ -47,4 +48,5 @@
   </tbody>
 </table>
 </div>
+<p class="muted quality-note">数据质量仅历史重建榜有值:full/partial/degraded 表示当月 GH Archive 事件密度分层的可信度(full 全可信,partial 仅 Top10 可信,degraded 不参与聚合);真实抓取榜由捕获校验保证,无此分层。</p>
 {% endblock %}

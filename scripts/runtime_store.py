@@ -215,14 +215,25 @@ class RuntimeStore:
             shutil.rmtree(staging, ignore_errors=True)
 
     def publish(self, staging: Path, generation_id: str) -> Path:
-        """staging 整体移入 generations/<id>;目标已存在则视为重复发布,丢弃候选。"""
+        """staging 整体移入 generations/<id>;目标已存在则视为重复发布,丢弃候选。
+
+        Windows 上新写出的文件可能被杀软/索引器短暂占用导致目录改名被拒,
+        有限重试;重试期间旧版本始终可服务。
+        """
         target = self.generation_dir(generation_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             self.discard_staging(staging)
             return target
-        os.replace(staging, target)  # 同卷目录改名,原子;Windows 目标不存在时可用
-        return target
+        last_exc: OSError | None = None
+        for attempt in range(20):
+            try:
+                os.replace(staging, target)  # 同卷目录改名,原子;目标不存在时可用
+                return target
+            except PermissionError as exc:
+                last_exc = exc
+                time.sleep(0.25)
+        raise last_exc  # type: ignore[misc]
 
     def clean_stale_staging(self, *, max_age_seconds: float = 24 * 3600):
         """删除过期 staging(进程崩溃残留)。当前正在写入的目录由调用方持有,

@@ -14,6 +14,11 @@
     {% endfor %}
   </select>
   <label><input type="checkbox" name="has_profile" value="1" {% if has_profile %}checked{% endif %}> 仅看有画像的</label>
+  <label>星数≥ <input type="number" name="stars_min" min="0" placeholder="0"{% if stars_min is not none %} value="{{ stars_min }}"{% endif %}></label>
+  <label>星数≤ <input type="number" name="stars_max" min="0" placeholder="0"{% if stars_max is not none %} value="{{ stars_max }}"{% endif %}></label>
+  <label>Top10天数≥ <input type="number" name="core_days_min" min="0" placeholder="0"{% if core_days_min is not none %} value="{{ core_days_min }}"{% endif %}></label>
+  <label>首次上榜 <input type="date" name="first_from"{% if first_from %} value="{{ first_from }}"{% endif %}></label>
+  <label>至 <input type="date" name="first_to"{% if first_to %} value="{{ first_to }}"{% endif %}></label>
   <button type="submit">搜索</button>
 </form>
 

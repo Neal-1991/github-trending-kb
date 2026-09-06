@@ -45,6 +45,14 @@ def test_search_single_char_prefix(client):
     assert r.status_code == 200
 
 
+def test_search_single_cjk_char_matches_all_fields(client):
+    # 单个汉字是完整的词,应走全字段模糊匹配(命中画像 one_liner),而非前缀匹配
+    data = client.get("/api/search", params={"q": "简"}).json()
+    assert data["query"]["mode"] == "like"
+    assert data["total"] == 1
+    assert data["rows"][0]["full_name"] == "owner0/repo0"
+
+
 def test_search_rejects_nul_and_control(client):
     r = client.get("/search", params={"q": "abc\x00def"})
     assert r.status_code == 422
@@ -524,3 +532,167 @@ def test_detail_warns_only_for_creation_after_first_trend(client):
     conn.commit()
     conn.close()
     assert "身份信息待核验" not in client.get("/repo/owner0/repo0").text
+
+
+# ---------- 任务 G:检索结构化过滤(stars / core_days / first_trend_date) ----------
+# 夹具数据:owner0..11 的 stars=100+i,core_days=2(i<=9)或 0(i=10/11),
+# first_trend_date='2022-03-01';evil/xss 与 degraded/only 三个字段均为 NULL。
+
+def test_api_search_stars_range_filter(client):
+    data = client.get("/api/search", params={"stars_min": "105"}).json()
+    assert data["total"] == 7  # owner5..owner11;stars 为 NULL 的行被排除
+    assert {r["full_name"] for r in data["rows"]} == \
+        {f"owner{i}/repo{i}" for i in range(5, 12)}
+    assert all(r["stars"] >= 105 for r in data["rows"])
+
+    data = client.get("/api/search", params={"stars_max": "102"}).json()
+    assert data["total"] == 3
+    assert {r["stars"] for r in data["rows"]} == {100, 101, 102}
+
+    data = client.get("/api/search",
+                      params={"stars_min": "101", "stars_max": "103"}).json()
+    assert data["total"] == 3
+    assert {r["stars"] for r in data["rows"]} == {101, 102, 103}
+
+
+def test_api_search_core_days_min_filter(client):
+    data = client.get("/api/search", params={"core_days_min": "2"}).json()
+    assert data["total"] == 10  # owner0..owner9 两天都进 Top10
+
+    # core_days=0 的 owner10/11 计入;core_days 为 NULL 的行被比较条件排除
+    data = client.get("/api/search", params={"core_days_min": "0"}).json()
+    assert data["total"] == 12
+
+    data = client.get("/api/search", params={"core_days_min": "3"}).json()
+    assert data["total"] == 0
+
+
+def test_api_search_first_trend_date_range_filter(client):
+    _add_new_face("late/face", "2022-03-05", lang="Go")
+
+    data = client.get("/api/search", params={"first_from": "2022-03-01"}).json()
+    assert data["total"] == 13  # 12 个夹具仓库 + late/face;first_trend_date 为 NULL 的行被排除
+    assert "evil/xss" not in {r["full_name"] for r in data["rows"]}
+
+    data = client.get("/api/search", params={"first_to": "2022-03-01"}).json()
+    assert data["total"] == 12  # late/face(03-05)被排除
+
+    data = client.get("/api/search",
+                      params={"first_from": "2022-03-02", "first_to": "2022-03-05"}).json()
+    assert data["total"] == 1
+    assert data["rows"][0]["full_name"] == "late/face"
+
+    data = client.get("/api/search", params={"first_from": "2022-03-06"}).json()
+    assert data["total"] == 0
+
+
+def test_api_search_filters_work_in_all_modes(client):
+    # all / single / like / fts 四种检索模式下结构化过滤都生效
+    cases = [
+        ({"stars_min": "105"}, 7),                    # all(空 q)
+        ({"q": "o", "stars_min": "105"}, 7),          # single(单字符前缀)
+        ({"q": "desc 1", "stars_min": "110"}, 2),     # like(含短词,命中 owner10/11)
+        ({"q": "desc", "stars_min": "108"}, 4),       # fts(命中 owner8..11)
+    ]
+    for params, expected in cases:
+        data = client.get("/api/search", params=params).json()
+        assert data["total"] == expected, f"params={params}: {data['total']} != {expected}"
+
+
+def test_api_search_filters_combined_with_q(client):
+    data = client.get("/api/search", params={
+        "q": "desc", "stars_min": "108", "core_days_min": "2",
+        "first_from": "2022-03-01", "first_to": "2022-03-02"}).json()
+    # q=desc 命中 12 个仓库;stars>=108 剩 owner8..11;core_days>=2 再剩 owner8/9
+    assert data["total"] == 2
+    assert {r["full_name"] for r in data["rows"]} == {"owner8/repo8", "owner9/repo9"}
+
+
+@pytest.mark.parametrize("params", [
+    {"stars_min": "-1"}, {"stars_min": "abc"}, {"stars_min": "1.5"}, {"stars_min": "+1"},
+    {"stars_max": "-2"}, {"stars_max": "2.0"},
+    {"core_days_min": "-1"}, {"core_days_min": "x"},
+    {"first_from": "2022-13-01"}, {"first_from": "2022-02-30"},
+    {"first_from": "20220301"}, {"first_from": "2022-3-1"},
+    {"first_to": "not-a-date"}, {"first_to": "03/01/2022"},
+])
+def test_api_search_invalid_filters_422(client, params):
+    r = client.get("/api/search", params=params)
+    assert r.status_code == 422, f"params={params}"
+    assert "detail" in r.json()
+
+
+def test_api_search_invalid_filter_detail_is_chinese(client):
+    r = client.get("/api/search", params={"stars_min": "abc"})
+    assert "非负整数" in r.json()["detail"]
+    r = client.get("/api/search", params={"first_from": "2022-3-1"})
+    assert "YYYY-MM-DD" in r.json()["detail"]
+    r = client.get("/api/search", params={"first_to": "2022-02-30"})
+    assert "不是有效日期" in r.json()["detail"]
+
+
+def test_search_html_invalid_filter_422(client):
+    assert client.get("/search", params={"stars_min": "abc"}).status_code == 422
+    assert client.get("/search", params={"first_from": "2022-13-01"}).status_code == 422
+
+
+def test_api_search_empty_filter_params_ignored(client):
+    # 空字符串视同未提供:不过滤,回显 null
+    data = client.get("/api/search", params={
+        "q": "", "stars_min": "", "stars_max": "", "core_days_min": "",
+        "first_from": "", "first_to": ""}).json()
+    assert data["total"] == 14  # 全部仓库(含 evil/xss、degraded/only)
+    assert data["query"]["stars_min"] is None
+    assert data["query"]["first_from"] is None
+
+
+def test_api_search_filter_echo(client):
+    data = client.get("/api/search", params={
+        "stars_min": "105", "stars_max": "200", "core_days_min": "1",
+        "first_from": "2022-03-01", "first_to": "2022-03-02"}).json()
+    query = data["query"]
+    assert query["stars_min"] == 105 and query["stars_max"] == 200
+    assert query["core_days_min"] == 1
+    assert query["first_from"] == "2022-03-01"
+    assert query["first_to"] == "2022-03-02"
+
+    # 未提供时回显 null,与 has_profile 回显风格一致
+    data = client.get("/api/search", params={"q": "desc"}).json()
+    assert data["query"]["stars_min"] is None
+    assert data["query"]["stars_max"] is None
+    assert data["query"]["core_days_min"] is None
+    assert data["query"]["first_from"] is None
+    assert data["query"]["first_to"] is None
+
+
+def test_search_page_has_structured_filter_inputs(client):
+    r = client.get("/search")
+    assert r.status_code == 200
+    assert 'type="number"' in r.text
+    assert 'name="stars_min"' in r.text
+    assert 'name="stars_max"' in r.text
+    assert 'name="core_days_min"' in r.text
+    assert 'type="date"' in r.text
+    assert 'name="first_from"' in r.text
+    assert 'name="first_to"' in r.text
+    # 原有控件仍在
+    assert 'name="q"' in r.text and 'name="lang"' in r.text
+    assert 'name="has_profile"' in r.text
+
+
+def test_search_page_filters_kept_and_pagination_carries_them(client):
+    params = {"q": "desc", "per_page": 5, "stars_min": "105",
+              "first_from": "2022-03-01"}
+    r = client.get("/search", params=params)
+    assert r.status_code == 200
+    assert "共 7 条结果" in r.text
+    assert 'value="105"' in r.text              # 提交后保留数字过滤输入
+    assert 'value="2022-03-01"' in r.text       # 提交后保留日期过滤输入
+    assert "下一页" in r.text
+    assert "stars_min=105" in r.text            # 翻页链接携带过滤参数
+    assert "first_from=2022-03-01" in r.text
+    assert "q=desc" in r.text                   # 原有关键词同样保留
+
+    r2 = client.get("/search", params={**params, "page": 2})
+    assert r2.status_code == 200
+    assert "共 7 条结果" in r2.text              # 第 2 页过滤仍然生效

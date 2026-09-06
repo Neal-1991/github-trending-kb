@@ -8,6 +8,8 @@ SQLite FTS5 全文检索,不依赖任何 LLM。
 - FTS(trigram,≥3字符词)与 LIKE 回退(<3字符词)覆盖同一组文本列;
 - LIKE 转义 % _ 与转义符;单字符只做仓库名前缀/语言精确匹配;
 - 返回真实总数与分页(默认 30,最大 100),排序模式如实标注;
+- 结构化过滤 stars_min/stars_max/core_days_min(非负整数)与 first_from/first_to
+  (YYYY-MM-DD),HTML 与 JSON 同口径;空串视同未提供,非法值 422(中文 detail);
 - (list_type, date) 无数据时回退该榜最新日期并提示;
 - 数据库只读连接(request 级),缺库明确失败,不创建空库;
 - 动态 SVG 文本全部转义;homepage 仅允许 http/https;
@@ -17,6 +19,7 @@ SQLite FTS5 全文检索,不依赖任何 LLM。
 """
 import html
 import json
+import re
 import secrets
 import sqlite3
 import sys
@@ -146,6 +149,14 @@ class ParsedQuery:
         self.terms = terms
 
 
+def _is_cjk_char(ch: str) -> bool:
+    """单字符即成词的 CJK 文字(汉字/假名/谚文),不适用"首字符前缀"语义。"""
+    code = ord(ch)
+    return (0x2E80 <= code <= 0x9FFF      # 部首/假名/注音/汉字(含扩展A)
+            or 0xAC00 <= code <= 0xD7AF   # 谚文音节
+            or 0xF900 <= code <= 0xFAFF)  # CJK 兼容汉字
+
+
 def parse_query(q: str) -> ParsedQuery:
     for ch in q:
         if ord(ch) < 32 and ch not in ("\t", "\n", "\r"):
@@ -159,6 +170,9 @@ def parse_query(q: str) -> ParsedQuery:
             terms.append(t)
     terms = terms[:12]
     if len(terms) == 1 and len(terms[0]) == 1:
+        # 单个 CJK 字符是完整的词,按全字段模糊匹配;单字母保留前缀匹配
+        if _is_cjk_char(terms[0]):
+            return ParsedQuery("like", terms)
         return ParsedQuery("single", terms)
     if any(len(t) < 3 for t in terms):
         return ParsedQuery("like", terms)
@@ -222,10 +236,58 @@ def index(request: Request, conn: sqlite3.Connection = Depends(get_db)):
     })
 
 
+def _parse_nonneg_int(raw: str, name: str) -> int | None:
+    """过滤参数用的非负整数:空串视同未提供;非数字/负数/超长(>15 位)一律 422。"""
+    v = (raw or "").strip()
+    if not v:
+        return None
+    if not re.fullmatch(r"[0-9]{1,15}", v):
+        raise HTTPException(status_code=422, detail=f"{name} 必须是非负整数")
+    return int(v)
+
+
+def _parse_iso_date(raw: str, name: str) -> str | None:
+    """过滤参数用的日期:仅接受 YYYY-MM-DD 且必须是真实存在的日期;空串视同未提供。"""
+    v = (raw or "").strip()
+    if not v:
+        return None
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", v):
+        raise HTTPException(status_code=422, detail=f"{name} 格式应为 YYYY-MM-DD")
+    try:
+        date.fromisoformat(v)
+    except ValueError:
+        raise HTTPException(status_code=422,
+                            detail=f"{name} 不是有效日期: {v}") from None
+    return v
+
+
+def parse_search_filters(stars_min: str = "", stars_max: str = "",
+                         core_days_min: str = "", first_from: str = "",
+                         first_to: str = "") -> dict:
+    """解析 /search 与 /api/search 共用的结构化过滤参数。
+
+    返回的 dict 可直接 ** 展开传给 search_repos 与模板上下文;
+    未提供的参数为 None,非法值抛 422(中文 detail)。
+    """
+    return {
+        "stars_min": _parse_nonneg_int(stars_min, "stars_min(星数下限)"),
+        "stars_max": _parse_nonneg_int(stars_max, "stars_max(星数上限)"),
+        "core_days_min": _parse_nonneg_int(core_days_min, "core_days_min(最小上榜天数)"),
+        "first_from": _parse_iso_date(first_from, "first_from(首次上榜起始日)"),
+        "first_to": _parse_iso_date(first_to, "first_to(首次上榜截止日)"),
+    }
+
+
 def search_repos(conn: sqlite3.Connection, q: str, lang: str = "",
-                 has_profile: str = "", page: int = 1, per_page: int = 30) -> dict:
+                 has_profile: str = "", page: int = 1, per_page: int = 30,
+                 stars_min: int | None = None, stars_max: int | None = None,
+                 core_days_min: int | None = None, first_from: str | None = None,
+                 first_to: str | None = None) -> dict:
     """检索核心(HTML /search 与 JSON /api/search 共用):解析 q、拼 SQL、取 rows 与分页。
 
+    结构化过滤(应先经 parse_search_filters 校验):stars_min/stars_max/core_days_min
+    为非负整数,first_from/first_to 为 YYYY-MM-DD;None 表示未提供。
+    first_trend_date 为 NULL 的行会被日期比较条件自然排除(期望行为)。
     返回 total/pages/rows 等字典;含控制字符等非法输入由 parse_query 抛 422。
     rows 为 sqlite3.Row(fts 模式额外含 bm25 score 列)。
     """
@@ -236,6 +298,21 @@ def search_repos(conn: sqlite3.Connection, q: str, lang: str = "",
         filter_params.append(lang)
     if has_profile:
         filters.append("p.full_name IS NOT NULL")
+    if stars_min is not None:
+        filters.append("r.stars >= ?")
+        filter_params.append(stars_min)
+    if stars_max is not None:
+        filters.append("r.stars <= ?")
+        filter_params.append(stars_max)
+    if core_days_min is not None:
+        filters.append("r.core_days >= ?")
+        filter_params.append(core_days_min)
+    if first_from:
+        filters.append("r.first_trend_date >= ?")
+        filter_params.append(first_from)
+    if first_to:
+        filters.append("r.first_trend_date <= ?")
+        filter_params.append(first_to)
 
     match_conds: list[str] = []
     match_params: list = []
@@ -280,9 +357,13 @@ def search_repos(conn: sqlite3.Connection, q: str, lang: str = "",
 def search(request: Request, conn: sqlite3.Connection = Depends(get_db),
            q: str = Query("", max_length=200),
            lang: str = "", has_profile: str = "",
+           stars_min: str = "", stars_max: str = "", core_days_min: str = "",
+           first_from: str = "", first_to: str = "",
            page: int = Query(1, ge=1), per_page: int = Query(30, ge=1, le=100)):
+    flt = parse_search_filters(stars_min, stars_max, core_days_min,
+                               first_from, first_to)
     res = search_repos(conn, q, lang=lang, has_profile=has_profile,
-                       page=page, per_page=per_page)
+                       page=page, per_page=per_page, **flt)
     # langs 下拉数据仅 HTML 页面需要,单独查询
     langs = conn.execute("""
       SELECT language, count(*) n FROM repos
@@ -292,7 +373,7 @@ def search(request: Request, conn: sqlite3.Connection = Depends(get_db),
         "q": res["q"], "rows": res["rows"], "langs": langs, "sel_lang": lang,
         "has_profile": has_profile, "total": res["total"], "page": res["page"],
         "pages": res["pages"], "per_page": res["per_page"], "mode": res["mode"],
-        "sort_label": res["sort_label"],
+        "sort_label": res["sort_label"], **flt,
     })
 
 
@@ -415,6 +496,7 @@ def repo_detail(request: Request, full_name: str,
         "rank_svg": rank_svg, "rank_note": rank_note, "topics": topics,
         "identity_risk": bool(repo.get("created_at") and repo.get("first_trend_date")
                               and repo["created_at"][:10] > repo["first_trend_date"]),
+        "identity_note": repo.get("identity_note") or "",
     })
 
 
@@ -592,12 +674,19 @@ def trends(request: Request, conn: sqlite3.Connection = Depends(get_db)):
 def api_search(conn: sqlite3.Connection = Depends(get_db),
                q: str = Query("", max_length=200),
                lang: str = "", has_profile: str = "",
+               stars_min: str = "", stars_max: str = "", core_days_min: str = "",
+               first_from: str = "", first_to: str = "",
                page: int = Query(1, ge=1), per_page: int = Query(30, ge=1, le=100)):
     """检索 JSON 版:输入回显 + 真实总数分页 + 行数据(fts 模式含 bm25 score)。"""
+    flt = parse_search_filters(stars_min, stars_max, core_days_min,
+                               first_from, first_to)
     res = search_repos(conn, q, lang=lang, has_profile=has_profile,
-                       page=page, per_page=per_page)
+                       page=page, per_page=per_page, **flt)
     return JSONResponse({
         "query": {"q": q, "lang": lang, "has_profile": bool(has_profile),
+                  "stars_min": flt["stars_min"], "stars_max": flt["stars_max"],
+                  "core_days_min": flt["core_days_min"],
+                  "first_from": flt["first_from"], "first_to": flt["first_to"],
                   "page": page, "per_page": per_page,
                   "mode": res["mode"], "sort_label": res["sort_label"]},
         "total": res["total"], "page": res["page"], "pages": res["pages"],

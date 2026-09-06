@@ -49,6 +49,11 @@ class SourcePaths:
         return self.raw_dir / "star_anomaly_overrides.txt"
 
     @property
+    def identity_flags_path(self) -> Path:
+        """身份/元数据冲突标注(scripts/identity_flags.py 产出;可选文件)。"""
+        return self.raw_dir / "identity_flags.json"
+
+    @property
     def missing_readmes(self) -> Path:
         """README 永久缺失清单(可选;同步版本通常没有)。"""
         return self.readme_dir / "_missing.txt"

@@ -17,7 +17,9 @@ os.replace 正式库;任何一步失败,正式库保持不变。聚合口径为 
 元数据合并:repo_meta_api.jsonl 同一仓库存在多行历史观测,导入前按 full_name
 分组只保留 fetched_at 最新一行(确定性,与文件行序解耦,见
 latest_api_meta_by_full_name);repo_meta_snapshot.csv 无 fetched_at,保持内部
-first-wins(重复与冲突由 audit_data.py 报告)。
+first-wins(重复与冲突由 audit_data.py 报告)。仓库身份/元数据冲突的证据化
+标注(scripts/identity_flags.py 产出的 data/raw/identity_flags.json)在 rebuild
+末尾摄取到 repos.identity_note;文件缺失=无标注,不可解析则 fail closed。
 """
 import csv
 import json
@@ -66,7 +68,8 @@ CREATE TABLE repos (
   core_days INTEGER,          -- 历史重建榜 arch:total Top10 天数(页面口径)
   best_rank INTEGER,          -- trusted 口径最佳名次
   best_daily_stars INTEGER,   -- trusted 口径单日最高星标(排除疑似刷星)
-  profile_status TEXT DEFAULT 'pending'  -- pending / done / no_readme / low_priority
+  profile_status TEXT DEFAULT 'pending',  -- pending / done / no_readme / low_priority
+  identity_note TEXT DEFAULT ''  -- 身份/元数据冲突标注(rebuild 摄取 data/raw/identity_flags.json)
 );
 
 CREATE TABLE trend_daily (
@@ -143,6 +146,29 @@ def sqlite_version() -> tuple:
     return tuple(int(x) for x in sqlite3.sqlite_version.split("."))
 
 
+# FTS 纳入 README 正文时每篇的截断口径:取前 6000 字符(与画像输入一致,控制 trigram 索引体积)
+FTS_README_MAX_CHARS = 6000
+
+
+def _fts_readme_texts(readme_dir) -> dict[str, str]:
+    """批量读取 README_DIR 下的 README 文本(按 {full_name.replace('/', '__')}.md 命名)。
+
+    返回 {文件名: 截断后的文本};目录缺失、单文件缺失或读取/解码失败一律按空串
+    或跳过处理,绝不让 rebuild 因 README 而失败。
+    """
+    texts: dict[str, str] = {}
+    try:
+        entries = list(Path(readme_dir).glob("*.md"))
+    except OSError:
+        return texts
+    for path in entries:
+        try:
+            texts[path.name] = path.read_text(encoding="utf-8")[:FTS_README_MAX_CHARS]
+        except (OSError, ValueError):
+            texts[path.name] = ""
+    return texts
+
+
 def reindex_fts(conn: sqlite3.Connection):
     """重建全文索引。trigram 分词支持中文子串检索;老 SQLite 回退 unicode61。"""
     version = sqlite_version()
@@ -155,17 +181,21 @@ def reindex_fts(conn: sqlite3.Connection):
         conn.execute("DROP TABLE IF EXISTS search_fts")
         conn.execute(f"""CREATE VIRTUAL TABLE search_fts USING fts5(
         full_name, description, topics, language, one_liner,
-        purpose, boundaries, tech_highlights, maturity,
+        purpose, boundaries, tech_highlights, maturity, readme,
         {tokenizer}
       )""")
-        conn.execute("""
-      INSERT INTO search_fts
+        base_rows = conn.execute("""
       SELECT r.full_name, COALESCE(r.description,''), COALESCE(r.topics,''),
              COALESCE(r.language,''), COALESCE(p.one_liner,''),
              COALESCE(p.purpose,''), COALESCE(p.boundaries,''),
              COALESCE(p.tech_highlights,''), COALESCE(p.maturity,'')
       FROM repos r LEFT JOIN profiles p USING (full_name)
-        """)
+        """).fetchall()
+        readmes = _fts_readme_texts(README_DIR)
+        conn.executemany(
+            "INSERT INTO search_fts VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (tuple(row) + (readmes.get(row["full_name"].replace("/", "__") + ".md", ""),)
+             for row in base_rows))
         conn.execute("RELEASE SAVEPOINT rebuild_search_fts")
     except BaseException:
         conn.execute("ROLLBACK TO SAVEPOINT rebuild_search_fts")
@@ -285,6 +315,52 @@ def apply_star_anomaly_overrides(conn: sqlite3.Connection,
             "UPDATE trend_daily SET star_anomaly=?"
             " WHERE date=? AND full_name=? AND list_type='arch:total'",
             (flag, day, name))
+        applied += max(cur.rowcount, 0)
+    conn.commit()
+    return applied
+
+
+def parse_identity_flags(text: str) -> dict[str, str]:
+    """解析身份标注文件 data/raw/identity_flags.json(纯函数),返回 {full_name: note}。
+
+    期望结构: {"generated_at": ..., "repos": {"owner/repo": {"flags": [...],
+    "note": "...", "evidence": {...}}}}(由 scripts/identity_flags.py 生成)。
+    JSON 不可解析或结构不符(note 非字符串等)抛 ValueError:标注文件损坏时
+    宁可重建失败(fail closed),也不静默丢弃标注——与 star_anomaly_overrides
+    的精神一致;文件缺失才是合法的"无标注"(见 apply_identity_notes)。
+    """
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"identity_flags.json 解析失败(重建 fail closed): {e}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("repos"), dict):
+        raise ValueError("identity_flags.json 结构错误: 顶层应为含 repos 映射的对象")
+    notes: dict[str, str] = {}
+    for name, entry in data["repos"].items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"identity_flags.json 条目格式错误: {name!r}(应为对象)")
+        note = entry.get("note", "")
+        if note is not None and not isinstance(note, str):
+            raise ValueError(f"identity_flags.json 条目 note 非字符串: {name!r}")
+        if note:
+            notes[name] = note
+    return notes
+
+
+def apply_identity_notes(conn: sqlite3.Connection,
+                         flags_path: Path | None = None) -> int:
+    """repos 行齐备后摄取身份标注到 identity_note;返回实际标注的行数。
+
+    文件缺失=无标注,静默跳过;文件存在但不可解析则抛 ValueError →
+    rebuild fail closed。flags 中不存在于 repos 的仓库自然跳过(rowcount 0)。
+    """
+    path = Path(flags_path) if flags_path else _default_sources().identity_flags_path
+    if not path.exists():
+        return 0
+    notes = parse_identity_flags(path.read_text(encoding="utf-8"))
+    applied = 0
+    for name, note in sorted(notes.items()):
+        cur = conn.execute("UPDATE repos SET identity_note=? WHERE full_name=?", (note, name))
         applied += max(cur.rowcount, 0)
     conn.commit()
     return applied
@@ -434,6 +510,11 @@ def _import_sources(conn: sqlite3.Connection, sources: SourcePaths):
       SELECT DISTINCT full_name, 0, 'trend', 'pending' FROM trend_daily
     """)
     conn.commit()
+
+    # 2e) 身份标注:data/raw/identity_flags.json(scripts/identity_flags.py 产出,
+    #     meta_conflict / created_after_trend 的证据化说明)。repos 行齐备后统一
+    #     摄取到 identity_note;文件缺失=无标注,不可解析则抛错 → fail closed。
+    apply_identity_notes(conn, sources.identity_flags_path)
 
     # 3) 画像
     profiles_file = sources.profiles_jsonl

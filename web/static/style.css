@@ -65,6 +65,10 @@ tr:last-child td { border-bottom: none; }
 .search-form select, .search-form button { padding: 8px 12px; border-radius: 8px;
                                           border: 1px solid var(--line); background: #fff; }
 .search-form button { background: var(--accent); color: #fff; border: none; cursor: pointer; }
+.search-form input[type="number"], .search-form input[type="date"] {
+  padding: 7px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.search-form input[type="number"] { width: 96px; }
+.search-form input[type="date"] { width: 142px; }
 ol.list { background: var(--card-bg); border: 1px solid var(--line); border-radius: 8px;
           padding: 12px 12px 12px 34px; }
 ol.list li { padding: 4px 0; }

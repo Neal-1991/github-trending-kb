@@ -43,7 +43,7 @@ from scripts.runtime_store import (
     utcnow_iso,
 )
 from scripts.snapshot_store import load_snapshot
-from scripts.source_paths import SourcePaths
+from scripts.source_paths import SourcePaths, default as default_source_paths
 
 # ---------- 白名单 ----------
 # 必需文件:缺失即同步失败(保留旧版)
@@ -57,6 +57,7 @@ REQUIRED_FILES = {
 # 可选文件:远端不存在 → 候选中也没有(不继承旧版残留)
 OPTIONAL_FILES = {
     "data/raw/star_anomaly_overrides.txt",
+    "data/raw/identity_flags.json",
     "data/daily/push_log.jsonl",
 }
 SNAPSHOT_PATH_RE = re.compile(r"^data/daily/snapshots/\d{4}/\d{2}/\d{4}-\d{2}-\d{2}\.json$")
@@ -468,6 +469,7 @@ def _make_manifest(*, generation_id: str, commit: str | None, source: str,
 _LOCAL_WHITELIST = [
     "raw/repo_meta_snapshot.csv", "raw/repo_meta_api.jsonl",
     "raw/trends_gharchive.csv", "raw/star_anomaly_overrides.txt",
+    "raw/identity_flags.json",
     "daily/trends.jsonl", "daily/push_log.jsonl", "profiles/profiles.jsonl",
 ]
 
@@ -636,7 +638,7 @@ def build_local_generation(store: RuntimeStore | None = None, *,
 
     store = store or RuntimeStore()
     build_version = build_version or config.DB_BUILD_VERSION
-    src = sources or SourcePaths.default()
+    src = sources or default_source_paths()
 
     def _running(**patch):
         patch.setdefault("running", True)

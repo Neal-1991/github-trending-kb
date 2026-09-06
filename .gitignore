@@ -10,3 +10,4 @@ data/diagnostics/
 venv/
 .pytest_cache/
 .ruff_cache/
+data/runtime/

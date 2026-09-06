@@ -11,12 +11,16 @@ SQLite FTS5 全文检索,不依赖任何 LLM。
 - (list_type, date) 无数据时回退该榜最新日期并提示;
 - 数据库只读连接(request 级),缺库明确失败,不创建空库;
 - 动态 SVG 文本全部转义;homepage 仅允许 http/https;
-- 只读 JSON API:/api/search、/api/repo/{full_name}、/api/day/{date} 与 HTML 同口径。
+- 只读 JSON API:/api/search、/api/repo/{full_name}、/api/day/{date} 与 HTML 同口径;
+- 本地同步:/api/sync/status 只读本地状态;/api/sync 手动触发(同源+CSRF 保护);
+  查询库按 active 指针解析 runtime 版本,无同步版本时回退工作区 data/trending.db。
 """
 import html
 import json
+import secrets
 import sqlite3
 import sys
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -25,12 +29,40 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import config
 from config import ROOT
 from scripts.db import connect_ro
+from scripts.runtime_store import RuntimeStore
 
-app = FastAPI(title="GitHub 趋势榜知识库", docs_url=None, redoc_url=None, openapi_url=None)
+# 本地同步协调器(lifespan 启停;测试默认不启动)。CSRF token 进程内随机。
+sync_coordinator = None
+SYNC_CSRF_TOKEN = secrets.token_urlsafe(32)
+
+_SYNC_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global sync_coordinator
+    sync_coordinator = None
+    if config.DATA_SYNC_ENABLED:
+        from web.sync_service import SyncCoordinator
+
+        sync_coordinator = SyncCoordinator()
+        sync_coordinator.start()
+    try:
+        yield
+    finally:
+        if sync_coordinator is not None:
+            sync_coordinator.stop(timeout=5.0)
+        sync_coordinator = None
+
+
+app = FastAPI(title="GitHub 趋势榜知识库", docs_url=None, redoc_url=None,
+              openapi_url=None, lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "web/static"), name="static")
 templates = Jinja2Templates(directory=str(ROOT / "web/templates"))
 
@@ -47,13 +79,43 @@ async def security_headers(request: Request, call_next):
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'")
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
     return resp
 
 
+def resolve_db_path() -> Path | None:
+    """解析当前可查询库:runtime active 指针优先,回退工作区 data/trending.db。
+
+    每个请求调用一次(请求内使用同一只读连接);config 调用时读取,测试可替换。
+    """
+    db = RuntimeStore().db_path_for_active()
+    if db is not None:
+        return db
+    legacy = Path(config.DB_PATH)
+    return legacy if legacy.exists() else None
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """缺库时 HTML 页面渲染"正在准备数据",JSON API 保持结构化错误。"""
+    wants_html = ("text/html" in request.headers.get("accept", "")
+                  and not request.url.path.startswith("/api/")
+                  and request.url.path not in ("/healthz", "/readyz"))
+    if exc.status_code == 503 and wants_html:
+        return templates.TemplateResponse(request, "preparing.html", {},
+                                          status_code=503)
+    headers = getattr(exc, "headers", None) or {}
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                        headers=headers)
+
+
 def get_db():
+    db_path = resolve_db_path()
+    if db_path is None:
+        raise HTTPException(status_code=503, detail="数据库暂不可用")
     try:
-        conn = connect_ro()
+        conn = connect_ro(db_path)
     except (OSError, sqlite3.Error) as exc:
         raise HTTPException(status_code=503, detail="数据库暂不可用") from exc
     try:
@@ -595,6 +657,59 @@ def readyz(conn: sqlite3.Connection = Depends(get_db)):
     except sqlite3.Error as e:
         return JSONResponse({"status": "unavailable", "error": str(e)}, status_code=503)
     return JSONResponse({"status": "ready", "repos": n})
+
+
+# ---------- 本地数据同步 API(不依赖数据库;轮询绝不请求 GitHub) ----------
+
+def _host_allowed(request: Request) -> bool:
+    """写接口只接受本机回环 Host,拒绝通过代理/其他主机名转发。"""
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host:
+        return False
+    if host.startswith("["):                      # IPv6 形如 [::1]:8000
+        end = host.find("]")
+        hostname = host[1:end] if end != -1 else host[1:]
+    elif host.count(":") == 1:                    # host:port
+        hostname = host.rsplit(":", 1)[0]
+    else:
+        hostname = host
+    return hostname in _SYNC_ALLOWED_HOSTS
+
+
+@app.get("/api/sync/status")
+def api_sync_status():
+    from web.sync_service import status_payload
+
+    payload = status_payload(sync_coordinator)
+    payload["csrf_token"] = SYNC_CSRF_TOKEN
+    return JSONResponse(payload)
+
+
+@app.post("/api/sync")
+def api_sync_trigger(request: Request):
+    """异步触发一次同步检查:立即返回 202;正在同步则合并到现有任务。
+
+    保护:Host 白名单 + 同源 Origin 校验 + 本地 CSRF token(进程内随机),
+    不依赖"只在 localhost 监听"这一层。
+    """
+    if not _host_allowed(request):
+        raise HTTPException(status_code=403, detail="不允许的 Host")
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).netloc.lower() != \
+            (request.headers.get("host") or "").lower():
+        raise HTTPException(status_code=403, detail="跨站请求被拒绝")
+    if request.headers.get("x-csrf-token") != SYNC_CSRF_TOKEN:
+        raise HTTPException(status_code=403, detail="CSRF 校验失败")
+    from web.sync_service import status_payload
+
+    if sync_coordinator is not None:
+        trigger = sync_coordinator.trigger()
+    else:
+        trigger = {"triggered": False, "reason": "disabled"}
+    payload = status_payload(sync_coordinator)
+    payload["trigger"] = trigger
+    payload["csrf_token"] = SYNC_CSRF_TOKEN
+    return JSONResponse(payload, status_code=202)
 
 
 # ---------- SVG(动态文本一律转义) ----------

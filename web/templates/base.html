@@ -19,9 +19,14 @@
            placeholder="搜索项目 / 画像 (中文可用)…" value="{{ q or '' }}">
   </form>
 </nav>
+<div class="sync-bar" id="sync-bar">
+  <span id="sync-status-text" role="status" aria-live="polite">同步状态加载中…</span>
+  <button id="sync-button" type="button" class="sync-button" hidden>立即同步</button>
+</div>
 <main id="main">
 {% block content %}{% endblock %}
 </main>
 <footer>GitHub 趋势榜知识库 · 本地检索,不依赖 LLM · 数据来源:GH Archive 重建榜 + 每日真实榜单</footer>
+<script src="{{ url_for('static', path='/sync.js') }}" defer></script>
 </body>
 </html>

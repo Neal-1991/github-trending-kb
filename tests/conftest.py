@@ -1,7 +1,9 @@
 """测试公共设施:临时目录、隔离的 source 布局、最小样本数据。
 
 所有测试不访问真实网络、不读取 .env 中的秘密、不写仓库内 data/ 目录。
+同步测试的假远端/假客户端设施也在本文件(git_blob_sha/make_remote_files/FakeClient)。
 """
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -45,6 +47,17 @@ def protect_real_data():
                 f"测试污染了真实数据文件 data/{w}\n新增内容尾部: {tail!r}")
 
 
+@pytest.fixture(autouse=True)
+def disable_auto_sync(monkeypatch):
+    """测试默认关闭本地自动同步:任何 TestClient/lifespan 都不得偷跑真实同步。
+
+    需要验证后台生命周期的用例,在用例内显式 monkeypatch 打开并注入假客户端。
+    """
+    import config
+
+    monkeypatch.setattr(config, "DATA_SYNC_ENABLED", False)
+
+
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     """把 config 与各模块的路径全部切到 tmp_path,返回目录句柄。"""
@@ -59,6 +72,7 @@ def sandbox(tmp_path, monkeypatch):
         "daily": tmp_path / "daily",
         "profiles": tmp_path / "profiles",
         "readmes": tmp_path / "readmes",
+        "runtime": tmp_path / "runtime",
     }
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
@@ -69,6 +83,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PROFILE_DIR", dirs["profiles"])
     monkeypatch.setattr(config, "README_DIR", dirs["readmes"])
     monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(config, "DATA_RUNTIME_DIR", dirs["runtime"])
     # 各模块 from-import 的副本也要替换;模块可能随提交顺序尚未存在,容错处理
     monkeypatch.setattr(db_mod, "RAW_DIR", dirs["raw"])
     monkeypatch.setattr(db_mod, "DAILY_DIR", dirs["daily"])
@@ -172,3 +187,121 @@ def make_trending_html(n: int, *, stars_today: bool = True, repos: list[str] | N
           {star_html}
         </article>""")
     return f"<html><body>{''.join(articles)}</body></html>"
+
+
+# ---------- 本地数据同步测试设施(假远端 + 假客户端,全部离线) ----------
+
+def git_blob_sha(content: bytes) -> str:
+    """Git blob 对象哈希:sha1("blob <len>\0" + content)。"""
+    return hashlib.sha1(f"blob {len(content)}\0".encode("ascii") + content).hexdigest()
+
+
+def make_remote_files(*, day="2026-08-30", repos=3, arch_stars=100,
+                      extra_files: dict | None = None) -> dict[str, bytes]:
+    """构造一份"远端仓库白名单文件"内容映射,模拟 GitHub 上已提交的 source。
+
+    默认包含全部必需文件 + 一份 canonical 快照(day);快照日期晚于 legacy
+    trends.jsonl(2026-08-01)与历史重建榜(2022-03-01),保证候选库最新日期
+    等于快照日期(与 validate_source_files 的期望一致)。
+    """
+    from scripts.snapshot_store import build_snapshot
+
+    names = [f"owner{i}/repo{i}" for i in range(repos)]
+    meta_header = ("full_name,owner_type,description,fork,created_at,pushed_at,homepage,"
+                   "stargazers_count,forks_count,subscribers_count,language,archived,"
+                   "open_issues_count,license_key,topics,default_branch")
+    lines = [meta_header]
+    api_lines = []
+    for i, name in enumerate(names):
+        lines.append(f"{name},User,remote desc {i},false,2022-01-0{i + 1}T00:00:00Z,"
+                     f"2022-06-01T00:00:00Z,,{100 + i},10,5,Python,false,2,MIT,remote,main")
+        api_lines.append(json.dumps({
+            "full_name": name, "description": f"api desc {i}", "language": "Python",
+            "stars": 100 + i, "forks": 10, "open_issues": 2, "topics": ["sync"],
+            "created_at": "2022-01-01T00:00:00Z", "pushed_at": "2022-06-01T00:00:00Z",
+            "fetched_at": f"{day}T08:00:00+08:00"}, ensure_ascii=False))
+    profiles = [json.dumps({
+        "full_name": names[0], "one_liner": "远程画像", "purpose": "用途",
+        "boundaries": "边界", "tech_highlights": "技术", "maturity": "成熟",
+        "model": "glm-test", "source": "glm-api",
+        "generated_at": f"{day}T08:00:00+08:00"}, ensure_ascii=False)]
+    legacy = {"date": "2026-08-01", "list_type": "total", "entries": [
+        {"rank": i + 1, "repo": names[i], "description": None, "language": "Python",
+         "stars_total": 100 + i, "stars_today": 10 - i, "forks": 5}
+        for i in range(min(repos, 2))]}
+    snapshot = build_snapshot(day, [{"list_type": "total", "entries": [
+        {"rank": i + 1, "repo": names[i], "description": f"快照描述 {i}",
+         "language": "Python", "stars_total": 100 + i, "stars_today": 30 - i, "forks": 5}
+        for i in range(repos)]}])
+    files = {
+        "data/raw/repo_meta_snapshot.csv": ("\n".join(lines) + "\n").encode("utf-8"),
+        "data/raw/repo_meta_api.jsonl": ("\n".join(api_lines) + "\n").encode("utf-8"),
+        "data/raw/trends_gharchive.csv":
+            (f"date,repo,stars,quality\n2022-03-01,{names[0]},{arch_stars},full\n").encode("utf-8"),
+        "data/daily/trends.jsonl": (json.dumps(legacy, ensure_ascii=False) + "\n").encode("utf-8"),
+        "data/profiles/profiles.jsonl": ("\n".join(profiles) + "\n").encode("utf-8"),
+        f"data/daily/snapshots/{day[:4]}/{day[5:7]}/{day}.json":
+            (json.dumps(snapshot, ensure_ascii=False) + "\n").encode("utf-8"),
+    }
+    if extra_files:
+        files.update(extra_files)
+    return files
+
+
+class FakeClient:
+    """run_sync 的假 GitHub 客户端:内存文件表 + Git blob sha 语义。
+
+    fail_downloads: {第 N 次下载(1 起): SyncError} 用于注入下载中途失败。
+    """
+
+    def __init__(self, files: dict[str, bytes], head: str = "1" * 40,
+                 fail_downloads: dict[int, Exception] | None = None):
+        self.files = files
+        self.head = head
+        self.download_calls = 0
+        self.fail_downloads = fail_downloads or {}
+
+    def get_head(self) -> str:
+        return self.head
+
+    def get_tree(self, commit_sha: str) -> dict:
+        return {p: {"sha": git_blob_sha(c), "size": len(c)}
+                for p, c in self.files.items()}
+
+    def download_blob(self, blob_sha: str, size_hint: int, dest: Path,
+                      *, max_file_bytes: int) -> str:
+        self.download_calls += 1
+        if self.download_calls in self.fail_downloads:
+            raise self.fail_downloads[self.download_calls]
+        for content in self.files.values():
+            if git_blob_sha(content) == blob_sha:
+                assert len(content) == size_hint
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(content)
+                return hashlib.sha256(content).hexdigest()
+        raise AssertionError(f"未知 blob: {blob_sha[:8]}")
+
+
+class StubResp:
+    def __init__(self, status_code=200, json_data=None, content=b"", headers=None):
+        self.status_code = status_code
+        self._json = json_data
+        self.content = content
+        self.headers = headers or {}
+
+    def json(self):
+        return self._json
+
+
+class StubSession:
+    """按序弹出的 HTTP 应答栈;元素为 StubResp 或待抛异常。"""
+
+    def __init__(self, responses):
+        self.headers: dict = {}
+        self.responses = list(responses)
+
+    def get(self, url, headers=None, timeout=None):
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item

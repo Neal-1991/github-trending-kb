@@ -25,6 +25,21 @@ FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 FEISHU_OPEN_ID = os.getenv("FEISHU_OPEN_ID", "")   # ou_ 开头,发个人
 FEISHU_CHAT_ID = os.getenv("FEISHU_CHAT_ID", "")   # oc_ 开头,发群
 
+# 本地运行版本目录与数据同步(GitHub Actions 采集/日报分工不变;本地 Web 读取
+# runtime 内已校验发布的数据版本,由 scripts/sync_data.py 从远端拉取并建库)
+DATA_RUNTIME_DIR = DATA_DIR / "runtime"
+DATA_SYNC_ENABLED = os.getenv("DATA_SYNC_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+DATA_SYNC_REPO = os.getenv("DATA_SYNC_REPO", "Neal-1991/github-trending-kb")
+DATA_SYNC_BRANCH = os.getenv("DATA_SYNC_BRANCH", "main")
+DATA_SYNC_INTERVAL_SECONDS = int(os.getenv("DATA_SYNC_INTERVAL_SECONDS", "1800"))
+# 可选只读 Token(公共仓库可留空;仅用于 api.github.com,不写入 URL 与日志)
+DATA_SYNC_TOKEN = os.getenv("DATA_SYNC_TOKEN", "")
+DATA_SYNC_MAX_FILE_BYTES = int(os.getenv("DATA_SYNC_MAX_FILE_BYTES", str(64 * 1024 * 1024)))
+DATA_SYNC_MAX_TOTAL_BYTES = int(os.getenv("DATA_SYNC_MAX_TOTAL_BYTES", str(512 * 1024 * 1024)))
+DATA_SYNC_TASK_TIMEOUT_SECONDS = int(os.getenv("DATA_SYNC_TASK_TIMEOUT_SECONDS", "900"))
+# 建库逻辑版本:进入 manifest;版本升级会使同一数据触发重建
+DB_BUILD_VERSION = os.getenv("DB_BUILD_VERSION", "1")
+
 # 语言分榜(GitHub trending 语言名,小写)
 LANG_LISTS = ["python", "typescript", "javascript", "rust"]
 

@@ -23,6 +23,7 @@ python scripts/build_db.py
 # 2) 本地检索系统
 uvicorn web.app:app --port 8000
 # 打开 http://127.0.0.1:8000(/healthz /readyz 为健康检查)
+# 有旧库立即开查;后台每 30 分钟自动同步 GitHub 已提交的最新数据,页面右上角有状态条
 
 # 3) 预览每日任务(零副作用:不写数据、不调 GLM、不发消息)
 python scripts/daily_job.py --dry-run
@@ -50,6 +51,24 @@ python scripts/audit_data.py
 今日损坏快照会先归档并重新抓取，通过校验后再重建数据库；历史损坏快照保持失败，不用今天的数据替代。日报与周报分别尝试，发送失败记录事件并以非零状态退出，Actions 可识别失败；归档日志仍参与去重。完整运行未配置飞书时生成本地预览，显式 `--notify-only` 未配置通道则报错。
 
 画像积压保存在 `data/profiles/pending_queue.json`，每天最多处理 80 个：当天榜单优先，其余名额处理不再上榜的积压项目。临时失败次日重试，无 README 的仓库 30 天后复查；已完成画像从队列移除。队列跟随数据提交，不依赖 CI 中被清空的 README 缓存。
+
+## 本地网页自动同步
+
+云端分工不变:GitHub Actions 每日采集、生成画像、提交数据、发送飞书日报。本地网页新增**只读数据同步**——启动后先查询本地已有版本,后台把 GitHub 上已提交的白名单 source 拉到 `data/runtime/`(gitignore)重建候选库,全部校验通过才原子切换 `active.json` 指针;同步器不做任何 Git 写操作、不覆盖工作区代码与 tracked data、不调用模型、不发送通知。
+
+| 命令 | 行为 |
+|---|---|
+| `python scripts/sync_data.py --once` | 同步一次(成功退出 0,失败非 0;占用锁时退出 3) |
+| `python scripts/sync_data.py --status` | 只读本地同步状态,不触发网络 |
+| `python scripts/sync_data.py --list-generations` | 列出本地数据版本 |
+| `python scripts/sync_data.py --activate-generation ID` | 回滚:激活指定已验证版本(受锁保护) |
+| `python scripts/sync_data.py --build-local` | 离线时用工作区 source 构建初始版本 |
+
+页面行为:全站状态条显示"数据更新至 X / 正在下载数据 / 新数据已就绪 / 同步失败(旧数据可查)";"立即同步"按钮异步触发,运行中合并到现有任务;更新完成后点"刷新查看"(保留当前 URL),不自动刷新页面。首次启动无库时显示准备页,完成后自动进入首页。
+
+安全与健壮性:一次同步固定在远端 HEAD commit 上;下载只指向 api.github.com(公共仓库免 Token,可选 `DATA_SYNC_TOKEN` 只读);Git blob 哈希 + canonical 快照内容寻址 + 数据库完整性/日期一致性校验,任一失败保留旧版;跨进程文件锁防并发发布;`POST /api/sync` 有 Host 白名单 + 同源 Origin + CSRF token 三重校验。关闭 `DATA_SYNC_ENABLED` 即停止同步、保留查询。
+
+回滚:运行版本异常时用 `--activate-generation` 指回已验证版本,或将 `DATA_SYNC_ENABLED=false` 后用 `python scripts/build_db.py` 恢复工作区数据库模式;不需要删除任何数据。
 
 ## 飞书推送模式
 

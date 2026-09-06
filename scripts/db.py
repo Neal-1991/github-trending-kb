@@ -33,6 +33,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import ARCH_DAILY_STAR_ANOMALY, DAILY_DIR, DB_PATH, PROFILE_DIR, RAW_DIR, README_DIR
 from scripts.atomic_io import replace_file_with_retry
 from scripts.snapshot_store import iter_snapshots, snapshot_to_records
+from scripts.source_paths import SourcePaths
+
+
+def _default_sources() -> SourcePaths:
+    """调用时从 config 当前值构造默认 source(保留模块级路径副本供测试替换)。"""
+    return SourcePaths(raw_dir=RAW_DIR, daily_dir=DAILY_DIR,
+                       profiles_dir=PROFILE_DIR, readme_dir=README_DIR)
 
 SCHEMA = """
 CREATE TABLE repos (
@@ -262,9 +269,13 @@ def parse_star_anomaly_overrides(text: str) -> dict[tuple[str, str], int]:
     return rules
 
 
-def apply_star_anomaly_overrides(conn: sqlite3.Connection) -> int:
-    """趋势全部导入后统一应用人工覆盖(仅 arch:total 行);返回实际生效的行数。"""
-    path = RAW_DIR / "star_anomaly_overrides.txt"
+def apply_star_anomaly_overrides(conn: sqlite3.Connection,
+                                 overrides_path: Path | None = None) -> int:
+    """趋势全部导入后统一应用人工覆盖(仅 arch:total 行);返回实际生效的行数。
+
+    path 缺省时读取当前默认 source 的人工覆盖文件(调用时求值)。
+    """
+    path = Path(overrides_path) if overrides_path else _default_sources().overrides_path
     if not path.exists():
         return 0
     rules = parse_star_anomaly_overrides(path.read_text(encoding="utf-8"))
@@ -279,11 +290,11 @@ def apply_star_anomaly_overrides(conn: sqlite3.Connection) -> int:
     return applied
 
 
-def _import_sources(conn: sqlite3.Connection):
+def _import_sources(conn: sqlite3.Connection, sources: SourcePaths):
     """从 source 文件导入全部数据。每个阶段一个事务;异常向上抛,由 rebuild 清理临时库。"""
     # 1) 仓库元数据:repos 快照(INSERT OR IGNORE = first-wins,与历史行为一致;
     #    重复与冲突由 audit_data.py 报告)
-    snap = RAW_DIR / "repo_meta_snapshot.csv"
+    snap = sources.meta_snapshot_csv
     if snap.exists():
         with snap.open(encoding="utf-8", newline="") as f:
             rows = list(csv.DictReader(f))
@@ -307,7 +318,7 @@ def _import_sources(conn: sqlite3.Connection):
     #     同时保存请求名与 repository id,为身份迁移做准备)。
     #     同一仓库存在多行历史观测:先按 fetched_at 确定性合并(只保留最新一行,
     #     与文件行序解耦)再入库,导入结果不再依赖 JSONL 内的行顺序。
-    api_meta = RAW_DIR / "repo_meta_api.jsonl"
+    api_meta = sources.meta_api_jsonl
     if api_meta.exists():
         records = []
         for line in api_meta.read_text(encoding="utf-8").splitlines():
@@ -341,7 +352,7 @@ def _import_sources(conn: sqlite3.Connection):
 
     # 2) 趋势:GH Archive 重建榜(文件内已按日期+名次排序)。
     #    star_anomaly 在导入时按阈值判定;人工覆盖在趋势全部导入后统一应用(见 2d)。
-    arch = RAW_DIR / "trends_gharchive.csv"
+    arch = sources.trends_gharchive_csv
     if arch.exists():
         by_date = defaultdict(list)
         with arch.open(encoding="utf-8", newline="") as f:
@@ -365,7 +376,7 @@ def _import_sources(conn: sqlite3.Connection):
     canonical_dates = set()
     snapshot_entries = []
     trend_metadata = []
-    for snapshot in iter_snapshots():
+    for snapshot in iter_snapshots(sources.snapshot_root):
         date = snapshot["date"]
         canonical_dates.add(date)
         for rec in snapshot_to_records(snapshot):
@@ -382,7 +393,7 @@ def _import_sources(conn: sqlite3.Connection):
         conn.commit()
 
     # 兼容历史：同日已有 canonical 时整日跳过，避免部分/陈旧导出覆盖快照。
-    trends_jsonl = DAILY_DIR / "trends.jsonl"
+    trends_jsonl = sources.trends_jsonl
     if trends_jsonl.exists():
         entries = []
         for line in trends_jsonl.read_text(encoding="utf-8").splitlines():
@@ -415,7 +426,7 @@ def _import_sources(conn: sqlite3.Connection):
 
     # 2d) 人工覆盖:include=强制真实(flag 0)/exclude=强制疑似刷星(flag 1),仅作用于
     #     arch:total 行;文件缺失视为无覆盖,不可解析则抛错 → rebuild fail closed。
-    apply_star_anomaly_overrides(conn)
+    apply_star_anomaly_overrides(conn, sources.overrides_path)
 
     # 2c) 趋势中出现但缺元数据的仓库补占位行,保证 repos ⊇ trend_daily 的仓库集合
     conn.execute("""
@@ -425,7 +436,7 @@ def _import_sources(conn: sqlite3.Connection):
     conn.commit()
 
     # 3) 画像
-    profiles_file = PROFILE_DIR / "profiles.jsonl"
+    profiles_file = sources.profiles_jsonl
     if profiles_file.exists():
         records = []
         for line in profiles_file.read_text(encoding="utf-8").splitlines():
@@ -443,7 +454,7 @@ def _import_sources(conn: sqlite3.Connection):
         conn.commit()
 
     # README 永久缺失清单也是 source，避免全量重建丢失 profile 状态。
-    missing_readmes = README_DIR / "_missing.txt"
+    missing_readmes = sources.missing_readmes
     if missing_readmes.exists():
         names = [(line.strip(),) for line in missing_readmes.read_text(
             encoding="utf-8").splitlines() if line.strip()]
@@ -458,11 +469,11 @@ def _import_sources(conn: sqlite3.Connection):
     #    明细移入归档,数据库不能丢这些历史)。归档目录不存在时行为与旧版一致。
     #    同键冲突 INSERT OR REPLACE 后写覆盖,live 文件最后导入 → 当前状态优先。
     push_records = []
-    archive_dir = DAILY_DIR / "archive"
+    archive_dir = sources.push_archive_dir
     if archive_dir.exists():
         for archive_file in sorted(archive_dir.glob("*.jsonl")):
             push_records.extend(_push_log_rows(archive_file))
-    push_file = DAILY_DIR / "push_log.jsonl"
+    push_file = sources.push_log
     if push_file.exists():
         push_records.extend(_push_log_rows(push_file))
     if push_records:
@@ -489,12 +500,16 @@ def _validate_db(conn: sqlite3.Connection, had_sources: bool):
             raise RuntimeError(f"重建校验失败: FTS 行数 {n_fts} != repos 行数 {n_repos}")
 
 
-def rebuild(db_path=None, close: sqlite3.Connection | None = None) -> sqlite3.Connection:
+def rebuild(db_path=None, close: sqlite3.Connection | None = None,
+            *, sources: SourcePaths | None = None) -> sqlite3.Connection:
     """从 raw/daily/profiles 文件全量重建数据库(原子、幂等)。
 
     流程:同目录临时库构建 → 完整性/FTS 校验 → os.replace 正式库。
     失败时删除临时库并抛错,正式库保持不变、可继续服务。
+    sources 为 None 时使用当前默认 source(历史行为不变);后台同步传入
+    候选 source 目录,不影响 Web 请求与测试使用的全局路径。
     """
+    src = sources or _default_sources()
     target = Path(db_path or DB_PATH)
     if close is not None:
         close.close()
@@ -506,12 +521,8 @@ def rebuild(db_path=None, close: sqlite3.Connection | None = None) -> sqlite3.Co
     try:
         conn = connect(tmp)
         conn.executescript(SCHEMA)
-        had_sources = any(
-            p.exists() for p in [
-                RAW_DIR / "repo_meta_snapshot.csv", RAW_DIR / "repo_meta_api.jsonl",
-                RAW_DIR / "trends_gharchive.csv", DAILY_DIR / "trends.jsonl",
-                PROFILE_DIR / "profiles.jsonl"]) or any(iter_snapshots())
-        _import_sources(conn)
+        had_sources = src.has_any_source()
+        _import_sources(conn, src)
         refresh_repo_stats(conn)
         reindex_fts(conn)
         _validate_db(conn, had_sources)

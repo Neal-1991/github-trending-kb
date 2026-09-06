@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+
+{% block title %}正在准备数据 · GitHub 趋势榜知识库{% endblock %}
+
+{% block content %}
+<div class="preparing-panel" id="preparing-panel">
+  <h1>正在准备数据…</h1>
+  <p id="preparing-text" role="status" aria-live="polite">
+    首次启动正在获取或构建本地数据库,完成后本页会自动进入首页。
+  </p>
+  <p class="preparing-hint">采集仍在 GitHub Actions 每日运行;本页只同步已提交的数据,不影响既有查询。</p>
+  <button id="preparing-retry" type="button" class="sync-button">重试同步</button>
+</div>
+{% endblock %}

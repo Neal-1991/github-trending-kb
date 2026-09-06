@@ -25,6 +25,9 @@ uvicorn web.app:app --port 8000
 # 打开 http://127.0.0.1:8000(/healthz /readyz 为健康检查)
 # 有旧库立即开查;后台每 30 分钟自动同步 GitHub 已提交的最新数据,页面右上角有状态条
 
+# 代码更新后一键重启(自动结束旧进程 → 启动新服务 → 就绪后打开页面)
+# 双击运行或命令行执行,可带端口参数: restart_web.bat 8001
+
 # 3) 预览每日任务(零副作用:不写数据、不调 GLM、不发消息)
 python scripts/daily_job.py --dry-run
 

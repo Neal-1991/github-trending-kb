@@ -43,7 +43,8 @@ from scripts.runtime_store import (
     utcnow_iso,
 )
 from scripts.snapshot_store import load_snapshot
-from scripts.source_paths import SourcePaths, default as default_source_paths
+from scripts.source_paths import SourcePaths
+from scripts.source_paths import default as default_source_paths
 
 # ---------- 白名单 ----------
 # 必需文件:缺失即同步失败(保留旧版)

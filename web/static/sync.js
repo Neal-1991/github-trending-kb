@@ -101,12 +101,21 @@
   function poll() {
     fetch("/api/sync/status", { credentials: "same-origin" })
       .then(function (resp) {
+        if (resp.status === 404) {
+          // 页面模板已更新但服务进程还是旧版:直接说清原因,避免误判为故障
+          setText(statusText, "同步接口不存在:本地服务是更新前启动的,请重启 uvicorn 后刷新页面");
+          schedule(60000);
+          return null;
+        }
         if (!resp.ok) {
           throw new Error("HTTP " + resp.status);
         }
         return resp.json();
       })
       .then(function (st) {
+        if (st === null) {
+          return;
+        }
         render(st);
         schedule(st && st.running ? 2000 : 30000);
       })

@@ -1,8 +1,8 @@
 {
   "bannedbook/fanqiang": {
     "status": "retry",
-    "attempts": 1,
+    "attempts": 2,
     "queued_at": "2026-09-06",
-    "retry_at": "2026-09-07"
+    "retry_at": "2026-09-08"
   }
 }

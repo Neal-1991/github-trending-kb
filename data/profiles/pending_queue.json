@@ -1,14 +1,14 @@
 {
   "bannedbook/fanqiang": {
     "status": "retry",
-    "attempts": 6,
+    "attempts": 7,
     "queued_at": "2026-09-06",
-    "retry_at": "2026-09-12"
+    "retry_at": "2026-09-13"
   },
   "mekos2772/ios-location-spoofer": {
     "status": "retry",
-    "attempts": 4,
+    "attempts": 5,
     "queued_at": "2026-09-08",
-    "retry_at": "2026-09-12"
+    "retry_at": "2026-09-13"
   }
 }

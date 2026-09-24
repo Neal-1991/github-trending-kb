@@ -1,26 +1,20 @@
 {
   "bannedbook/fanqiang": {
     "status": "retry",
-    "attempts": 16,
+    "attempts": 17,
     "queued_at": "2026-09-06",
-    "retry_at": "2026-09-22"
+    "retry_at": "2026-09-25"
   },
   "mekos2772/ios-location-spoofer": {
     "status": "retry",
-    "attempts": 14,
+    "attempts": 15,
     "queued_at": "2026-09-08",
-    "retry_at": "2026-09-22"
+    "retry_at": "2026-09-25"
   },
   "WebKit/WebKit": {
     "status": "no_readme",
     "attempts": 1,
     "queued_at": "2026-09-18",
     "retry_at": "2026-10-18"
-  },
-  "mihail911/modern-software-dev-assignments": {
-    "status": "retry",
-    "attempts": 1,
-    "queued_at": "2026-09-21",
-    "retry_at": "2026-09-22"
   }
 }

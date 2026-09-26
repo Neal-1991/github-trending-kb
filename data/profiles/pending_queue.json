@@ -1,9 +1,9 @@
 {
   "bannedbook/fanqiang": {
     "status": "retry",
-    "attempts": 18,
+    "attempts": 19,
     "queued_at": "2026-09-06",
-    "retry_at": "2026-09-26"
+    "retry_at": "2026-09-27"
   },
   "WebKit/WebKit": {
     "status": "no_readme",

@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from config import TRENDING_MIN_ENTRIES
 from scripts import snapshot_store as snap
 from scripts.fetch_trending import parse_trending, validate_entries
 from tests.conftest import make_trending_html
@@ -65,7 +66,7 @@ def test_load_snapshot_rejects_tampered_content(sandbox):
 def test_validation_rejects_bad_batch():
     problems = validate_entries("total", [])
     assert problems  # 空榜单必须产生问题项
-    entries = parse_trending(make_trending_html(5))  # 少于下限 10
+    entries = parse_trending(make_trending_html(TRENDING_MIN_ENTRIES - 1))  # 少于条数下限
     assert any("条数" in p for p in validate_entries("total", entries))
 
 

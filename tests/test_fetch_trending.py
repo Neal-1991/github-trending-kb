@@ -138,8 +138,8 @@ def test_validate_duplicate_repo():
 
 
 def test_validate_coverage_below_threshold():
-    # 一半条目 stars_today=0:50% < 60%,应判定选择器可能失效
-    half = TRENDING_MIN_ENTRIES // 2
+    # 过半条目 stars_today=0:覆盖率 < 60%,应判定选择器可能失效
+    half = TRENDING_MIN_ENTRIES - TRENDING_MIN_ENTRIES // 2
     entries = make_entries(TRENDING_MIN_ENTRIES)
     for i, e in enumerate(entries):
         if i < half:
@@ -278,7 +278,7 @@ def test_fetch_all_one_empty_fails_whole_batch(monkeypatch):
 
 
 def test_fetch_all_invalid_entries_fail_batch(monkeypatch):
-    bad = make_entries(5)  # 低于条数下限
+    bad = make_entries(TRENDING_MIN_ENTRIES - 1)  # 低于条数下限
     entries = make_entries(12)
     monkeypatch.setattr(ft, "fetch_list", _fake_fetch_list(
         {"total": entries, "lang:python": bad, "lang:typescript": entries,

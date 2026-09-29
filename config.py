@@ -44,7 +44,7 @@ DB_BUILD_VERSION = os.getenv("DB_BUILD_VERSION", "1")
 LANG_LISTS = ["python", "typescript", "javascript", "rust"]
 
 # 抓取校验(所有榜单作为一批提交,任一校验失败不生成 canonical 快照)
-TRENDING_MIN_ENTRIES = 10    # 单榜条数下限
+TRENDING_MIN_ENTRIES = 5     # 单榜条数下限;trending 条目数全天波动,UTC 凌晨可低至 8 条(2026-09-28/29 因此整批失败)
 TRENDING_MAX_ENTRIES = 40    # 单榜条数上限
 STARS_TODAY_COVERAGE = 0.6   # stars_today > 0 的覆盖率阈值
 

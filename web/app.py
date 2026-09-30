@@ -466,7 +466,7 @@ def repo_detail(request: Request, full_name: str,
       WHERE full_name = ? AND list_type='arch:total'
       ORDER BY date
     """, (full_name,)).fetchall()
-    spark = sparkline([r["stars"] for r in trend])
+    spark = sparkline([(r["date"], r["stars"]) for r in trend])
     # 排名走势:历史重建榜 trusted 口径(full 全可信,partial 仅 Top10);
     # 无可信历史记录时回退真实抓取榜(total)。
     rank_rows = conn.execute("""
@@ -808,17 +808,27 @@ PALETTE = ["#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
 
 
 def sparkline(points: list, w: int = 640, h: int = 90) -> str:
+    """历史单日星标曲线。points 为 (label, value) 或纯数值列表;
+    每个数据点带 <title> 悬停提示(零 JS),透明热区圆保证小点也可悬停。"""
     if not points:
         return ""
-    mx = max(points) or 1
-    step = w / max(len(points) - 1, 1)
-    coords = " ".join(f"{i * step:.1f},{h - 6 - (p / mx) * (h - 14):.1f}"
-                      for i, p in enumerate(points))
+    pairs = [p if isinstance(p, (tuple, list)) else ("", p) for p in points]
+    values = [p[1] for p in pairs]
+    mx = max(values) or 1
+    step = w / max(len(pairs) - 1, 1)
+    coords = " ".join(f"{i * step:.1f},{h - 6 - (v / mx) * (h - 14):.1f}"
+                      for i, (_, v) in enumerate(pairs))
     area = f"M0,{h} L" + coords.replace(" ", " L") + f" L{w},{h} Z"
-    return (f'<svg viewBox="0 0 {w} {h}" class="spark" role="img" '
-            f'aria-label="历史单日星标曲线">'
-            f'<path d="{area}" fill="rgba(78,121,169,.15)"/>'
-            f'<polyline points="{coords}" fill="none" stroke="#4e79a7" stroke-width="2"/></svg>')
+    out = [f'<svg viewBox="0 0 {w} {h}" class="spark" role="img" '
+           f'aria-label="历史单日星标曲线">'
+           f'<path d="{area}" fill="rgba(78,121,169,.15)"/>'
+           f'<polyline points="{coords}" fill="none" stroke="#4e79a7" stroke-width="2"/>']
+    for i, (label, v) in enumerate(pairs):
+        tip = f"{label}: +{v}⭐" if label else f"+{v}⭐"
+        out.append(f'<circle cx="{i * step:.1f}" cy="{h - 6 - (v / mx) * (h - 14):.1f}" '
+                   f'r="6" fill="transparent"><title>{html.escape(tip)}</title></circle>')
+    out.append("</svg>")
+    return "".join(out)
 
 
 def rank_chart(points: list, full_name: str = "", w: int = 640, h: int = 180) -> str:
@@ -847,6 +857,11 @@ def rank_chart(points: list, full_name: str = "", w: int = 640, h: int = 180) ->
         out.append(f'<text x="4" y="{y - 3:.1f}" class="axis">#{tick}</text>')
     out.append(f'<polyline points="{coords}" fill="none" '
                f'stroke="#4e79a7" stroke-width="2"/>')
+    for i, p in enumerate(points):    # 每点透明热区 + <title> 悬停提示(零 JS)
+        p_date = p["date"] if "date" in p.keys() else ""
+        tip = f"{p_date}: 第 {p['rank']} 名" if p_date else f"第 {p['rank']} 名"
+        out.append(f'<circle cx="{i * step:.1f}" cy="{y_of(ranks[i]):.1f}" '
+                   f'r="7" fill="transparent"><title>{html.escape(tip)}</title></circle>')
     if len(ranks) == 1:               # 单点画不出折线,补一个标记
         out.append(f'<circle cx="0" cy="{y_of(ranks[0]):.1f}" r="3" fill="#4e79a7"/>')
     out.append("</svg>")

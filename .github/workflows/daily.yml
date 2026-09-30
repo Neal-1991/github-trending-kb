@@ -40,8 +40,8 @@ jobs:
         env:
           # 优先用 PAT(额度更高),否则回退 Actions 内置 token
           GITHUB_TOKEN: ${{ secrets.GH_PAT || github.token }}
-          GLM_API_KEY: ${{ secrets.GLM_API_KEY }}
-          GLM_MODEL: ${{ vars.GLM_MODEL || 'glm-4.5-flash' }}
+          LONGCAT_API_KEY: ${{ secrets.LONGCAT_API_KEY }}
+          LONGCAT_MODEL: ${{ vars.LONGCAT_MODEL || 'LongCat-2.5-Preview' }}
         run: |
           capture_date=$(python -c 'from scripts.daily_job import today_bj; print(today_bj())')
           python scripts/daily_job.py --capture-only --date "$capture_date"

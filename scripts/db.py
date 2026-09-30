@@ -95,7 +95,7 @@ CREATE TABLE profiles (
   tech_highlights TEXT,
   maturity TEXT,
   model TEXT,
-  source TEXT,                -- zcode / glm-api
+  source TEXT,                -- zcode / glm-api(历史) / longcat-api
   generated_at TEXT,
   input_hash TEXT,
   schema_version INTEGER,

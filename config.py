@@ -16,8 +16,8 @@ DB_PATH = DATA_DIR / "trending.db"
 
 # 密钥(均可为空:缺失时对应功能降级并给出明确提示)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GLM_API_KEY = os.getenv("GLM_API_KEY", "")
-GLM_MODEL = os.getenv("GLM_MODEL", "glm-4.5-flash")
+LONGCAT_API_KEY = os.getenv("LONGCAT_API_KEY", "")
+LONGCAT_MODEL = os.getenv("LONGCAT_MODEL", "LongCat-2.5-Preview")
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")
 # 飞书自建应用(可发私聊;与群 webhook 二选一,webhook 优先)
 FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")

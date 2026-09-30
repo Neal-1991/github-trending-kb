@@ -1,4 +1,4 @@
-"""批量生成项目画像(GLM API):按优先级补齐缺少画像的核心仓库。
+"""批量生成项目画像(LongCat API):按优先级补齐缺少画像的核心仓库。
 
 优先级:Top10 上榜天数 → 单日峰值;跳过无 README 的仓库。
 可断点续跑(已有画像的自动跳过)。
@@ -17,8 +17,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import GLM_API_KEY, GLM_MODEL, PROFILE_DIR, README_DIR
-from scripts import glm_client
+from config import LONGCAT_API_KEY, LONGCAT_MODEL, PROFILE_DIR, README_DIR
+from scripts import longcat_client
 from scripts.atomic_io import atomic_append_jsonl
 from scripts.db import connect
 
@@ -48,8 +48,8 @@ def main():
                     help="只画像 Top10 上榜天数达到该值的项目(0=全部有README的)")
     args = ap.parse_args()
 
-    if not GLM_API_KEY:
-        print("GLM_API_KEY 未配置(.env),无法生成画像。")
+    if not LONGCAT_API_KEY:
+        print("LONGCAT_API_KEY 未配置(.env),无法生成画像。")
         sys.exit(1)
 
     conn = connect()
@@ -86,25 +86,25 @@ def main():
             "stars": r["stars"], "created_at": r["created_at"],
         }
         readme = readme_path.read_text(encoding="utf-8")
-        input_hash = glm_client.profile_input_hash(r["full_name"], meta, readme, GLM_MODEL)
+        input_hash = longcat_client.profile_input_hash(r["full_name"], meta, readme, LONGCAT_MODEL)
         if conn.execute("SELECT 1 FROM profiles WHERE input_hash=?", (input_hash,)).fetchone():
             print(f"  [{i}/{len(todo)}] {r['full_name']} = 相同输入已完成,跳过")
             continue
-        p = glm_client.profile_repo(r["full_name"], meta, readme)
+        p = longcat_client.profile_repo(r["full_name"], meta, readme)
         if p:
-            rec = {"full_name": r["full_name"], **p, "model": GLM_MODEL,
-                   "source": "glm-api",
+            rec = {"full_name": r["full_name"], **p, "model": LONGCAT_MODEL,
+                   "source": "longcat-api",
                    "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
                    "input_hash": input_hash,
-                   "schema_version": glm_client.PROFILE_SCHEMA_VERSION,
-                   "prompt_version": glm_client.PROMPT_VERSION}
+                   "schema_version": longcat_client.PROFILE_SCHEMA_VERSION,
+                   "prompt_version": longcat_client.PROMPT_VERSION}
             atomic_append_jsonl(PROFILE_DIR / "profiles.jsonl", rec)
             # 同一连接写 profiles 表:重跑不重复生成/计费;Web 端 rebuild 后可见
             conn.execute("INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          (r["full_name"], p.get("one_liner"), p.get("purpose"),
                           p.get("boundaries"), p.get("tech_highlights"), p.get("maturity"),
-                          GLM_MODEL, "glm-api", rec["generated_at"], input_hash,
-                          glm_client.PROFILE_SCHEMA_VERSION, glm_client.PROMPT_VERSION))
+                          LONGCAT_MODEL, "longcat-api", rec["generated_at"], input_hash,
+                          longcat_client.PROFILE_SCHEMA_VERSION, longcat_client.PROMPT_VERSION))
             conn.execute("UPDATE repos SET profile_status='done' WHERE full_name=?",
                          (r["full_name"],))
             conn.commit()

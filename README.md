@@ -28,7 +28,7 @@ uvicorn web.app:app --port 8000
 # 代码更新后一键重启(自动结束旧进程 → 启动新服务 → 就绪后打开页面)
 # 双击运行或命令行执行,可带端口参数: restart_web.bat 8001
 
-# 3) 预览每日任务(零副作用:不写数据、不调 GLM、不发消息)
+# 3) 预览每日任务(零副作用:不写数据、不调 LLM、不发消息)
 python scripts/daily_job.py --dry-run
 
 # 4) 运行测试与数据审计
@@ -88,8 +88,8 @@ python scripts/audit_data.py
 | 变量 | 用途 | 缺失时的降级行为 |
 |---|---|---|
 | `GITHUB_TOKEN` | 元数据补全、README 抓取备援 | 历史仓库元数据不全,新项目画像质量下降 |
-| `GLM_API_KEY` | 每日新项目的 AI 画像 | 推送无一句话点评,画像留空 |
-| `GLM_MODEL` | 默认 `glm-4.5-flash`(免费档) | — |
+| `LONGCAT_API_KEY` | 每日新项目的 AI 画像(LongCat,OpenAI 兼容) | 推送无一句话点评,画像留空 |
+| `LONGCAT_MODEL` | 默认 `LongCat-2.5-Preview`(可选 `LongCat-2.0`) | — |
 | `FEISHU_WEBHOOK` | 飞书群机器人推送 | 回退自建应用;都未配置则本地预览 |
 | `FEISHU_APP_ID/SECRET/OPEN_ID/CHAT_ID` | 自建应用通道(可发云文档) | 缺云文档权限时自动降级为摘要卡片 |
 
@@ -107,7 +107,7 @@ python scripts/audit_data.py
 │   ├── fetch_readmes.py       # raw HEAD 抓 README(免鉴权,状态分类)
 │   ├── build_db.py            # 全量重建 SQLite(原子替换,含 FTS5 索引)
 │   ├── fetch_trending.py      # 真实趋势榜解析 + 批次校验
-│   ├── glm_client.py          # GLM 画像客户端(schema 校验 + 重试)
+│   ├── longcat_client.py      # LongCat 画像客户端(schema 校验 + 重试)
 │   ├── feishu.py / feishu_doc.py  # 飞书卡片/云文档(重试 + 降级)
 │   ├── daily_job.py           # 每日编排:捕获→画像→通知(三阶段解耦)
 │   ├── profile_queue.py       # 持久化跨日画像队列、重试与缺 README 复查
@@ -135,7 +135,7 @@ python scripts/audit_data.py
 ## 部署每日任务(GitHub Actions)
 
 1. 新建 GitHub 仓库,推送本项目;
-2. 仓库 Settings → Secrets 添加 `GLM_API_KEY`、`FEISHU_WEBHOOK` 或自建应用四件套(可选 `GH_PAT`,额度更高);
+2. 仓库 Settings → Secrets 添加 `LONGCAT_API_KEY`、`FEISHU_WEBHOOK` 或自建应用四件套(可选 `GH_PAT`,额度更高);
 3. Actions 每天 UTC 00:00(北京 08:00)运行:Job A `capture-and-persist`(抓取+画像+提交数据)→ Job B `notify`(回放快照+推送);通知失败时数据已保留,可手动重跑 Job B。
 
 ## 已知限制

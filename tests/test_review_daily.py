@@ -15,7 +15,7 @@ from tests.conftest import make_trending_html, write_source_files
 def offline(monkeypatch):
     monkeypatch.setattr(dj, "today_bj", lambda: "2026-09-05")
     monkeypatch.setattr(dj, "GITHUB_TOKEN", "")
-    monkeypatch.setattr(dj, "GLM_API_KEY", "")
+    monkeypatch.setattr(dj, "LONGCAT_API_KEY", "")
     monkeypatch.setattr(dj, "FEISHU_APP_ID", "")
     monkeypatch.setattr(dj, "FEISHU_APP_SECRET", "")
     monkeypatch.setattr(feishu, "FEISHU_WEBHOOK", "mock-configured")

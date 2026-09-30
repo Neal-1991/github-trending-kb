@@ -2,27 +2,27 @@ import json
 
 import pytest
 
-from scripts import glm_client
+from scripts import longcat_client
 
 
 def test_hash_uses_exact_prompt_inputs():
     meta = {"description": "demo", "topics": ["ai", "tools"], "stars": 20}
-    hashed = glm_client.profile_input_hash("owner/repo", meta, "a" * 6000 + "old")
-    assert hashed == glm_client.profile_input_hash(
+    hashed = longcat_client.profile_input_hash("owner/repo", meta, "a" * 6000 + "old")
+    assert hashed == longcat_client.profile_input_hash(
         "owner/repo", {**meta, "topics": '["ai", "tools"]', "fetched_at": "later"},
         "a" * 6000 + "new",
     )
-    assert hashed != glm_client.profile_input_hash("owner/repo", meta, "changed")
-    assert hashed != glm_client.profile_input_hash("owner/repo", {**meta, "stars": 21}, "a" * 6000)
-    assert hashed != glm_client.profile_input_hash("owner/repo", meta, "a" * 6000, model="other")
-    assert glm_client.profile_input_hash("x", {}, "") == glm_client.profile_input_hash(
+    assert hashed != longcat_client.profile_input_hash("owner/repo", meta, "changed")
+    assert hashed != longcat_client.profile_input_hash("owner/repo", {**meta, "stars": 21}, "a" * 6000)
+    assert hashed != longcat_client.profile_input_hash("owner/repo", meta, "a" * 6000, model="other")
+    assert longcat_client.profile_input_hash("x", {}, "") == longcat_client.profile_input_hash(
         "x", {"topics": "[]", "fetched_at": "later"}, ""
     )
 
 
 def test_request_uses_same_normalized_input(monkeypatch):
     captured = []
-    valid = {field: "value" for field in glm_client.PROFILE_FIELDS}
+    valid = {field: "value" for field in longcat_client.PROFILE_FIELDS}
 
     class Response:
         status_code = 200
@@ -34,12 +34,12 @@ def test_request_uses_same_normalized_input(monkeypatch):
         captured.append(kwargs["json"])
         return Response()
 
-    monkeypatch.setattr(glm_client, "GLM_API_KEY", "offline")
-    monkeypatch.setattr(glm_client.requests, "post", post)
+    monkeypatch.setattr(longcat_client, "LONGCAT_API_KEY", "offline")
+    monkeypatch.setattr(longcat_client.requests, "post", post)
     meta = {"topics": '["ai", "tools"]'}
-    assert glm_client.profile_repo("x", meta, "a" * 6000 + "TRUNCATED") == valid
+    assert longcat_client.profile_repo("x", meta, "a" * 6000 + "TRUNCATED") == valid
     prompt = captured[0]["messages"][1]["content"]
-    assert prompt == glm_client._user_content("x", {"topics": ["ai", "tools"]}, "a" * 6000)
+    assert prompt == longcat_client._user_content("x", {"topics": ["ai", "tools"]}, "a" * 6000)
     assert "Topics: ai, tools" in prompt
     assert "TRUNCATED" not in prompt
 
@@ -62,8 +62,8 @@ def test_malformed_success_retries_without_crashing(monkeypatch, body):
         calls.append(1)
         return Response()
 
-    monkeypatch.setattr(glm_client, "GLM_API_KEY", "offline")
-    monkeypatch.setattr(glm_client.requests, "post", post)
-    monkeypatch.setattr(glm_client.time, "sleep", lambda _: None)
-    assert glm_client.profile_repo("x", {}, "readme") is None
+    monkeypatch.setattr(longcat_client, "LONGCAT_API_KEY", "offline")
+    monkeypatch.setattr(longcat_client.requests, "post", post)
+    monkeypatch.setattr(longcat_client.time, "sleep", lambda _: None)
+    assert longcat_client.profile_repo("x", {}, "readme") is None
     assert len(calls) == 3

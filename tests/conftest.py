@@ -162,7 +162,7 @@ def write_source_files(dirs: dict, *, repos=3, trend_days=2, profiles=1, real_da
     for i in range(profiles):
         profs.append({"full_name": f"owner{i}/repo{i}", "one_liner": f"项目{i}简介",
                       "purpose": "用途", "boundaries": "边界", "tech_highlights": "技术",
-                      "maturity": "成熟", "model": "glm-test", "source": "glm-api",
+                      "maturity": "成熟", "model": "longcat-test", "source": "longcat-api",
                       "generated_at": "2026-09-01T08:00:00+08:00"})
     with (dirs["profiles"] / "profiles.jsonl").open("a", encoding="utf-8") as f:
         for p in profs:
@@ -223,7 +223,7 @@ def make_remote_files(*, day="2026-08-30", repos=3, arch_stars=100,
     profiles = [json.dumps({
         "full_name": names[0], "one_liner": "远程画像", "purpose": "用途",
         "boundaries": "边界", "tech_highlights": "技术", "maturity": "成熟",
-        "model": "glm-test", "source": "glm-api",
+        "model": "longcat-test", "source": "longcat-api",
         "generated_at": f"{day}T08:00:00+08:00"}, ensure_ascii=False)]
     legacy = {"date": "2026-08-01", "list_type": "total", "entries": [
         {"rank": i + 1, "repo": names[i], "description": None, "language": "Python",

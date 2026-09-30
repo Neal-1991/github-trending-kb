@@ -15,7 +15,7 @@ def _records(n=12):
 
 @pytest.fixture()
 def no_network(monkeypatch):
-    """屏蔽一切外部调用:抓取返回固定样本,GLM/GitHub API/README/飞书均可断言。"""
+    """屏蔽一切外部调用:抓取返回固定样本,LLM/GitHub API/README/飞书均可断言。"""
     calls = {"fetch": 0, "send": 0, "doc": 0}
     monkeypatch.setattr(daily_job, "today_bj", lambda: "2026-09-01")
     records = _records()
@@ -38,7 +38,7 @@ def no_network(monkeypatch):
         "build_weekly_blocks": staticmethod(lambda *a, **k: []),
         "DocScopeError": __import__("scripts.feishu_doc", fromlist=["DocScopeError"]).DocScopeError,
     }))
-    monkeypatch.setattr(daily_job, "GLM_API_KEY", "")
+    monkeypatch.setattr(daily_job, "LONGCAT_API_KEY", "")
     monkeypatch.setattr(daily_job, "GITHUB_TOKEN", "")
     monkeypatch.setattr(daily_job, "FEISHU_APP_ID", "")
     monkeypatch.setattr(daily_job, "FEISHU_APP_SECRET", "")

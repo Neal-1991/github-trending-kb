@@ -4,7 +4,8 @@
 <h1>检索</h1>
 <form method="get" action="{{ url_for('search') }}" class="search-form">
   <label class="visually-hidden" for="q">关键词</label>
-  <input id="q" type="search" name="q" value="{{ q }}" placeholder="关键词,如 agent / 数据库 / agent 框架">
+  <input id="q" type="search" name="q" value="{{ q }}" autocomplete="off" spellcheck="false"
+         placeholder="关键词,如 agent / 数据库 / agent 框架">
   <label class="visually-hidden" for="lang">语言</label>
   <select id="lang" name="lang">
     <option value="">全部语言</option>
@@ -14,12 +15,19 @@
     {% endfor %}
   </select>
   <label><input type="checkbox" name="has_profile" value="1" {% if has_profile %}checked{% endif %}> 仅看有画像的</label>
-  <label>星数≥ <input type="number" name="stars_min" min="0" placeholder="0"{% if stars_min is not none %} value="{{ stars_min }}"{% endif %}></label>
-  <label>星数≤ <input type="number" name="stars_max" min="0" placeholder="0"{% if stars_max is not none %} value="{{ stars_max }}"{% endif %}></label>
-  <label>Top10天数≥ <input type="number" name="core_days_min" min="0" placeholder="0"{% if core_days_min is not none %} value="{{ core_days_min }}"{% endif %}></label>
-  <label>首次上榜 <input type="date" name="first_from"{% if first_from %} value="{{ first_from }}"{% endif %}></label>
-  <label>至 <input type="date" name="first_to"{% if first_to %} value="{{ first_to }}"{% endif %}></label>
   <button type="submit">搜索</button>
+  {% set filters_active = (stars_min is not none) or (stars_max is not none) or (core_days_min is not none) or first_from or first_to %}
+  <details class="filters" {% if filters_active %}open{% endif %}>
+    <summary>高级筛选{% if filters_active %}(已启用){% endif %}</summary>
+    <div class="filters-body">
+      <label>星数≥ <input type="number" name="stars_min" min="0" placeholder="0"{% if stars_min is not none %} value="{{ stars_min }}"{% endif %}></label>
+      <label>星数≤ <input type="number" name="stars_max" min="0" placeholder="0"{% if stars_max is not none %} value="{{ stars_max }}"{% endif %}></label>
+      <label>Top10天数≥ <input type="number" name="core_days_min" min="0" placeholder="0"{% if core_days_min is not none %} value="{{ core_days_min }}"{% endif %}></label>
+      <label>首次上榜 <input type="date" name="first_from"{% if first_from %} value="{{ first_from }}"{% endif %}></label>
+      <label>至 <input type="date" name="first_to"{% if first_to %} value="{{ first_to }}"{% endif %}></label>
+      <button type="submit">应用筛选</button>
+    </div>
+  </details>
 </form>
 
 <p class="muted">共 {{ total }} 条结果 · {{ sort_label }}
@@ -28,17 +36,17 @@
 <table>
   <caption class="visually-hidden">搜索结果列表</caption>
   <thead>
-  <tr><th scope="col">仓库</th><th scope="col">语言</th><th scope="col">Top10 天数</th><th scope="col">首次上榜</th><th scope="col">画像</th></tr>
+  <tr><th scope="col">仓库</th><th scope="col">语言</th><th scope="col" class="col-hide-sm">Top10 天数</th><th scope="col" class="col-hide-sm">首次上榜</th><th scope="col">画像</th></tr>
   </thead>
   <tbody>
   {% for r in rows %}
   <tr>
     <td><a href="{{ url_for('repo_detail', full_name=r.full_name) }}">{{ r.full_name }}</a>
-      {% if r.one_liner %}<div class="muted">{{ r.one_liner }}</div>
-      {% elif r.description %}<div class="muted">{{ r.description[:70] }}</div>{% endif %}</td>
+      {% if r.one_liner %}<span class="muted cell-note" title="{{ r.one_liner }}">{{ r.one_liner }}</span>
+      {% elif r.description %}<span class="muted cell-note" title="{{ r.description }}">{{ r.description[:70] }}</span>{% endif %}</td>
     <td>{{ r.language or "—" }}</td>
-    <td>{{ r.core_days or 0 }}</td>
-    <td>{{ r.first_trend_date or "—" }}</td>
+    <td class="col-hide-sm">{{ r.core_days or 0 }}</td>
+    <td class="col-hide-sm">{{ r.first_trend_date or "—" }}</td>
     <td>{% if r.one_liner %}✅{% else %}—{% endif %}</td>
   </tr>
   {% else %}

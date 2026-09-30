@@ -1,5 +1,6 @@
-"""GLM API 客户端:读 README + 元数据 → 项目画像 JSON。
+"""LongCat API 客户端:读 README + 元数据 → 项目画像 JSON。
 
+模型:LongCat-2.5-Preview(美团 LongCat,OpenAI 兼容端点)。
 输出字段(与 profiles 表一致):
   one_liner / purpose / boundaries / tech_highlights / maturity
 
@@ -17,9 +18,9 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config import GLM_API_KEY, GLM_MODEL
+from config import LONGCAT_API_KEY, LONGCAT_MODEL
 
-API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+API_URL = "https://api.longcat.chat/openai/v1/chat/completions"
 
 PROFILE_FIELDS = ["one_liner", "purpose", "boundaries", "tech_highlights", "maturity"]
 PROFILE_SCHEMA_VERSION = 2
@@ -31,7 +32,7 @@ FIELD_MAX = {  # 与提示词口径一致的超长保护
 
 
 def profile_input_hash(full_name: str, meta: dict, readme: str,
-                       model: str = GLM_MODEL) -> str:
+                       model: str = LONGCAT_MODEL) -> str:
     """对模型实际可见输入做内容寻址，用于避免相同输入重复计费。"""
     payload = {
         "user_content": _user_content(full_name, meta, readme),
@@ -86,25 +87,25 @@ def _user_content(full_name: str, meta: dict, readme: str) -> str:
 
 def profile_repo(full_name: str, meta: dict, readme: str, timeout: int = 90) -> dict | None:
     """README 作为不可信数据，由共享输入构造器以 README 节选结束 标记定界。"""
-    if not GLM_API_KEY:
+    if not LONGCAT_API_KEY:
         return None
     user_content = _user_content(full_name, meta, readme)
     payload = {
-        "model": GLM_MODEL,
+        "model": LONGCAT_MODEL,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
         "temperature": 0.3,
         "max_tokens": 2048,
-        # glm-4.5 系为思考型模型:不关思考,推理会耗尽 max_tokens 导致 content 为空
-        "thinking": {"type": "disabled"},
+        # LongCat-2.5 为思考型模型:思维链在 reasoning_content 单独返回,
+        # 不占用 content;OpenAI 兼容端点无 GLM 的 thinking 开关参数。
     }
     for attempt in range(1, 4):
         try:
             r = requests.post(
                 API_URL, json=payload, timeout=timeout,
-                headers={"Authorization": f"Bearer {GLM_API_KEY}"},
+                headers={"Authorization": f"Bearer {LONGCAT_API_KEY}"},
             )
             if r.status_code == 200:
                 text = _response_content(r.json())
@@ -112,11 +113,11 @@ def profile_repo(full_name: str, meta: dict, readme: str, timeout: int = 90) -> 
                 if parsed is not None:
                     return parsed
                 # 200 但空内容/解析失败/字段非法:同样进入重试(review T16)
-                print(f"  [glm] {full_name} 空内容/解析失败/字段非法, raw head: {repr((text or '')[:120])}, attempt {attempt}")
+                print(f"  [longcat] {full_name} 空内容/解析失败/字段非法, raw head: {repr((text or '')[:120])}, attempt {attempt}")
             else:
-                print(f"  [glm] {full_name} HTTP {r.status_code}: {r.text[:160]}, attempt {attempt}")
+                print(f"  [longcat] {full_name} HTTP {r.status_code}: {r.text[:160]}, attempt {attempt}")
         except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
-            print(f"  [glm] {full_name} error: {e}, attempt {attempt}")
+            print(f"  [longcat] {full_name} error: {e}, attempt {attempt}")
         time.sleep(4 * attempt)
     return None
 

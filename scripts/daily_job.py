@@ -2,7 +2,7 @@
 
 模式:
   python scripts/daily_job.py                     # 完整:捕获(或回放)→ 画像 → 通知
-  python scripts/daily_job.py --dry-run           # 零副作用:不写 source/快照、不调 GLM、不发消息
+  python scripts/daily_job.py --dry-run           # 零副作用:不写 source/快照、不调 LLM、不发消息
   python scripts/daily_job.py --capture-only      # 只捕获+画像+重建,不通知(CI Job A)
   python scripts/daily_job.py --notify-only       # 只回放 canonical 快照并通知(CI Job B)
   python scripts/daily_job.py --refresh-snapshot  # 显式抓新版本替换 canonical(旧版自动归档)
@@ -32,7 +32,7 @@ from config import (
     FEISHU_APP_SECRET,
     FEISHU_OPEN_ID,
     GITHUB_TOKEN,
-    GLM_API_KEY,
+    LONGCAT_API_KEY,
     PROFILE_DIR,
     RAW_DIR,
     README_DIR,
@@ -144,14 +144,14 @@ def capture_stage(conn: sqlite3.Connection | None, date: str, *, refresh: bool, 
 # ---------- 阶段 2:画像 ----------
 
 def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connection) -> dict:
-    """为新仓库补 API 元数据 + README + GLM 画像。返回 one_liner 映射。"""
+    """为新仓库补 API 元数据 + README + LongCat 画像。返回 one_liner 映射。"""
     one_liners = {}
     if not new_names:
         return one_liners
     if dry_run:
-        print(f"[profile] dry-run: 跳过 {len(new_names)} 个仓库的画像(不调 API/GLM)")
+        print(f"[profile] dry-run: 跳过 {len(new_names)} 个仓库的画像(不调 API/LLM)")
         return one_liners
-    from scripts import glm_client
+    from scripts import longcat_client
     from scripts.enrich_github_api import fetch as api_fetch
     from scripts.enrich_github_api import wait_for_quota
 
@@ -191,34 +191,34 @@ def profile_new_repos(new_names: list[str], dry_run: bool, conn: sqlite3.Connect
             conn.execute("UPDATE repos SET profile_status=? WHERE full_name=?",
                          ("no_readme" if status == "no_readme" else "pending", name))
             conn.commit()
-            print(f"  [{i}/{len(todo)}] {name}: readme={status},跳过 GLM")
+            print(f"  [{i}/{len(todo)}] {name}: readme={status},跳过 LongCat")
             continue
         conn.execute("UPDATE repos SET profile_status='pending' WHERE full_name=? "
                      "AND profile_status='no_readme'", (name,))
         conn.commit()
-        input_hash = glm_client.profile_input_hash(name, meta, readme)
+        input_hash = longcat_client.profile_input_hash(name, meta, readme)
         existing_profile = conn.execute(
             "SELECT one_liner FROM profiles WHERE input_hash=?", (input_hash,)).fetchone()
         if existing_profile:
             one_liners[name] = existing_profile["one_liner"] or ""
-            print(f"  [{i}/{len(todo)}] {name}: 相同画像输入已完成,跳过 GLM")
+            print(f"  [{i}/{len(todo)}] {name}: 相同画像输入已完成,跳过 LongCat")
             continue
-        if GLM_API_KEY:
-            p = glm_client.profile_repo(name, meta, readme)
+        if LONGCAT_API_KEY:
+            p = longcat_client.profile_repo(name, meta, readme)
             if p:
-                rec = {"full_name": name, **p, "model": glm_client.GLM_MODEL,
-                       "source": "glm-api", "generated_at": now_iso(),
+                rec = {"full_name": name, **p, "model": longcat_client.LONGCAT_MODEL,
+                       "source": "longcat-api", "generated_at": now_iso(),
                        "input_hash": input_hash,
-                       "schema_version": glm_client.PROFILE_SCHEMA_VERSION,
-                       "prompt_version": glm_client.PROMPT_VERSION}
+                       "schema_version": longcat_client.PROFILE_SCHEMA_VERSION,
+                       "prompt_version": longcat_client.PROMPT_VERSION}
                 append_jsonl(PROFILE_DIR / "profiles.jsonl", rec)
                 # 同连接写入 profiles 表:重跑不会重复生成/计费(review P1-04)
                 conn.execute(
                     "INSERT OR REPLACE INTO profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (name, p.get("one_liner"), p.get("purpose"), p.get("boundaries"),
-                     p.get("tech_highlights"), p.get("maturity"), glm_client.GLM_MODEL,
-                     "glm-api", rec["generated_at"], input_hash,
-                     glm_client.PROFILE_SCHEMA_VERSION, glm_client.PROMPT_VERSION))
+                     p.get("tech_highlights"), p.get("maturity"), longcat_client.LONGCAT_MODEL,
+                     "longcat-api", rec["generated_at"], input_hash,
+                     longcat_client.PROFILE_SCHEMA_VERSION, longcat_client.PROMPT_VERSION))
                 conn.execute("UPDATE repos SET profile_status='done' WHERE full_name=?", (name,))
                 conn.commit()
                 one_liners[name] = p.get("one_liner", "")

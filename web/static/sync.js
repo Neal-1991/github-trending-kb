@@ -128,12 +128,13 @@
   function schedule(delay) {
     if (timer) {
       clearTimeout(timer);
+      timer = null;
+    }
+    if (document.hidden) {
+      return;  // 页面隐藏时真正暂停:不再排程,由 visibilitychange 唤醒
     }
     timer = setTimeout(function () {
-      if (document.hidden) {
-        schedule(delay);  // 页面隐藏时暂停轮询,恢复可见立即拉取
-        return;
-      }
+      timer = null;
       poll();
     }, delay);
   }

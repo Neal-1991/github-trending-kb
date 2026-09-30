@@ -3,40 +3,40 @@ import json
 
 import pytest
 
-from scripts import glm_client
+from scripts import longcat_client
 from scripts.db import rebuild
 from tests.conftest import write_source_files
 
 
-def test_glm_parse_valid_json():
+def test_longcat_parse_valid_json():
     text = '{"one_liner":"一个项目","purpose":"用途","boundaries":"边界","tech_highlights":"技术","maturity":"成熟"}'
-    out = glm_client._parse_json(text)
+    out = longcat_client._parse_json(text)
     assert out and out["one_liner"] == "一个项目"
 
 
-def test_glm_parse_wrapped_json():
+def test_longcat_parse_wrapped_json():
     text = '好的,以下是结果:\n{"one_liner":"x","purpose":"y","boundaries":"z","tech_highlights":"w","maturity":"v"}\n完毕'
-    assert glm_client._parse_json(text)["purpose"] == "y"
+    assert longcat_client._parse_json(text)["purpose"] == "y"
 
 
-def test_glm_invalid_output_rejected():
-    assert glm_client._parse_json("not json") is None
+def test_longcat_invalid_output_rejected():
+    assert longcat_client._parse_json("not json") is None
     missing = '{"one_liner":"x"}'
-    assert glm_client._parse_json(missing) is None          # 缺字段 → None(触发重试)
+    assert longcat_client._parse_json(missing) is None          # 缺字段 → None(触发重试)
     wrong_type = '{"one_liner":1,"purpose":"y","boundaries":"z","tech_highlights":"w","maturity":"v"}'
-    assert glm_client._parse_json(wrong_type) is None       # 类型错误 → None
+    assert longcat_client._parse_json(wrong_type) is None       # 类型错误 → None
 
 
-def test_glm_overlong_field_truncated():
+def test_longcat_overlong_field_truncated():
     text = json.dumps({"one_liner": "长" * 500, "purpose": "y", "boundaries": "z",
                        "tech_highlights": "w", "maturity": "v"}, ensure_ascii=False)
-    out = glm_client._parse_json(text)
+    out = longcat_client._parse_json(text)
     assert len(out["one_liner"]) == 120
 
 
 def test_prompt_wraps_readme_as_untrusted():
     import inspect
-    src = inspect.getsource(glm_client.profile_repo)
+    src = inspect.getsource(longcat_client.profile_repo)
     assert "不可信" in src and "README 节选结束" in src
 
 
@@ -50,15 +50,15 @@ def test_profile_batch_writes_profiles_table(sandbox, monkeypatch, capsys):
     import scripts.profile_batch as pb
     monkeypatch.setattr(pb, "README_DIR", sandbox["readmes"])
     monkeypatch.setattr(pb, "PROFILE_DIR", sandbox["profiles"])
-    monkeypatch.setattr(pb, "GLM_API_KEY", "k")
-    monkeypatch.setattr(pb.glm_client, "GLM_API_KEY", "k")
+    monkeypatch.setattr(pb, "LONGCAT_API_KEY", "k")
+    monkeypatch.setattr(pb.longcat_client, "LONGCAT_API_KEY", "k")
 
     calls = []
     def fake_profile(name, meta, readme):
         calls.append(name)
         return {"one_liner": "简介", "purpose": "用途", "boundaries": "边界",
                 "tech_highlights": "技术", "maturity": "成熟"}
-    monkeypatch.setattr(pb.glm_client, "profile_repo", fake_profile)
+    monkeypatch.setattr(pb.longcat_client, "profile_repo", fake_profile)
 
     import sys as _sys
     _sys.argv = ["profile_batch.py", "--limit", "2", "--min-core-days", "0"]
@@ -68,7 +68,7 @@ def test_profile_batch_writes_profiles_table(sandbox, monkeypatch, capsys):
     assert conn.execute(
         "SELECT count(*) FROM profiles WHERE input_hash IS NOT NULL"
     ).fetchone()[0] == 2
-    # 重跑:profiles 表已有 → 不再调用 GLM(T17)
+    # 重跑:profiles 表已有 → 不再调用 LongCat(T17)
     calls.clear()
     pb.main()
     assert calls == []
@@ -85,9 +85,9 @@ def test_profile_batch_does_not_starve_on_no_readme(sandbox, monkeypatch, capsys
     import scripts.profile_batch as pb
     monkeypatch.setattr(pb, "README_DIR", sandbox["readmes"])
     monkeypatch.setattr(pb, "PROFILE_DIR", sandbox["profiles"])
-    monkeypatch.setattr(pb, "GLM_API_KEY", "k")
-    monkeypatch.setattr(pb.glm_client, "GLM_API_KEY", "k")
-    monkeypatch.setattr(pb.glm_client, "profile_repo",
+    monkeypatch.setattr(pb, "LONGCAT_API_KEY", "k")
+    monkeypatch.setattr(pb.longcat_client, "LONGCAT_API_KEY", "k")
+    monkeypatch.setattr(pb.longcat_client, "profile_repo",
                         lambda *a, **k: {"one_liner": "x", "purpose": "y", "boundaries": "z",
                                          "tech_highlights": "w", "maturity": "v"})
     import sys as _sys

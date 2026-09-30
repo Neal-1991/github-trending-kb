@@ -58,7 +58,7 @@ def test_post_sync_rejects_foreign_host(webapp):
 def test_post_sync_same_origin_token_ok_202(webapp):
     c = TestClient(webapp.app)
     r = c.post("/api/sync", headers=_csrf_headers(
-        webapp, {"Host": "127.0.0.1:8000", "Origin": "http://127.0.0.1:8000"}))
+        webapp, {"Host": "127.0.0.1:8002", "Origin": "http://127.0.0.1:8002"}))
     assert r.status_code == 202
     data = r.json()
     assert data["trigger"] == {"triggered": False, "reason": "disabled"}
@@ -66,7 +66,7 @@ def test_post_sync_same_origin_token_ok_202(webapp):
 
 def test_post_sync_accepts_loopback_hosts(webapp):
     c = TestClient(webapp.app)
-    for host in ("127.0.0.1:8000", "localhost:8000"):
+    for host in ("127.0.0.1:8002", "localhost:8002"):
         r = c.post("/api/sync", headers=_csrf_headers(webapp, {"Host": host}))
         assert r.status_code == 202, host
 

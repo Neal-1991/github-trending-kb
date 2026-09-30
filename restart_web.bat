@@ -2,11 +2,11 @@
 chcp 65001 >nul
 setlocal
 rem 本地网页一键重启:结束旧进程 → 启动新进程 → 就绪后自动打开页面
-rem 用法: restart_web.bat [端口]   (默认 8000;双击运行即用默认端口)
+rem 用法: restart_web.bat [端口]   (默认 8002;双击运行即用默认端口)
 rem 说明: 代码更新后必须重启进程才会生效(uvicorn 启动时加载代码)
 
 set PORT=%~1
-if "%PORT%"=="" set PORT=8000
+if "%PORT%"=="" set PORT=8002
 cd /d "%~dp0"
 
 echo [1/3] 检查端口 %PORT% 上的旧进程...

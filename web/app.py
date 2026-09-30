@@ -1,7 +1,7 @@
 """GitHub 趋势榜知识库 · 本地 Web 检索系统。
 
 SQLite FTS5 全文检索,不依赖任何 LLM。
-启动: uvicorn web.app:app --port 8000  →  http://127.0.0.1:8000
+启动: uvicorn web.app:app --port 8002  →  http://127.0.0.1:8002
 
 检索契约(review P1-06/P1-07):
 - q 最长 200 字符,去重后最多 12 个词;含 NUL/控制字符 → 422;
@@ -755,7 +755,7 @@ def _host_allowed(request: Request) -> bool:
     host = (request.headers.get("host") or "").strip().lower()
     if not host:
         return False
-    if host.startswith("["):                      # IPv6 形如 [::1]:8000
+    if host.startswith("["):                      # IPv6 形如 [::1]:8002
         end = host.find("]")
         hostname = host[1:end] if end != -1 else host[1:]
     elif host.count(":") == 1:                    # host:port

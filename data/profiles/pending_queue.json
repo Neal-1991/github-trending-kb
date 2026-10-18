@@ -1,9 +1,9 @@
 {
   "WebKit/WebKit": {
     "status": "no_readme",
-    "attempts": 1,
+    "attempts": 2,
     "queued_at": "2026-09-18",
-    "retry_at": "2026-10-18"
+    "retry_at": "2026-11-17"
   },
   "homarr-labs/homarr": {
     "status": "no_readme",

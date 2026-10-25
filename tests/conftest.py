@@ -233,6 +233,9 @@ def make_remote_files(*, day="2026-08-30", repos=3, arch_stars=100,
         {"rank": i + 1, "repo": names[i], "description": f"快照描述 {i}",
          "language": "Python", "stars_total": 100 + i, "stars_today": 30 - i, "forks": 5}
         for i in range(repos)]}])
+    # captured_at 是秒级时间戳:两次 make_remote_files 若跨秒,快照文件内容(进而
+    # 指纹)就不同,up_to_date 会被误判成远端有新数据。固定它保证同参数生成字节一致。
+    snapshot["captured_at"] = f"{day}T08:00:00+08:00"
     files = {
         "data/raw/repo_meta_snapshot.csv": ("\n".join(lines) + "\n").encode("utf-8"),
         "data/raw/repo_meta_api.jsonl": ("\n".join(api_lines) + "\n").encode("utf-8"),

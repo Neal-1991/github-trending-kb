@@ -7,9 +7,9 @@
   },
   "homarr-labs/homarr": {
     "status": "no_readme",
-    "attempts": 1,
+    "attempts": 2,
     "queued_at": "2026-10-01",
-    "retry_at": "2026-10-31"
+    "retry_at": "2026-11-30"
   },
   "claration/impactor": {
     "status": "no_readme",
